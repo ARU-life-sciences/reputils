@@ -1,0 +1,13 @@
+[package]
+name = "reputils"
+version = "0.1.0"
+authors = ["Max Brown <mb39@sanger.ac.uk>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "2.33.3"
+bio = "*"
+plotters = "*"
+streaming-stats = "0.1.28"
