@@ -38,11 +38,7 @@ fn main() {
                     Arg::with_name("append")
                         .short("a")
                         .long("append")
-                        .takes_value(true)
-                        .required(false)
-                        .default_value("true")
-                        .possible_values(&["true", "false"])
-                        .help("Append the consensus to the input fasta? Otherwise print consensus alone."),
+                        .help("Append the consensus to the input fasta."),
                 ),
         )
         .subcommand(
@@ -60,11 +56,7 @@ fn main() {
                     Arg::with_name("show")
                         .short("s")
                         .long("show")
-                        .takes_value(true)
-                        .required(true)
-                        .default_value("false")
-                        .possible_values(&["true", "false"])
-                        .help("Pretty print the alignment?"),
+                        .help("Pretty print the alignment."),
                 )
         )
         .subcommand(
@@ -100,11 +92,7 @@ fn main() {
                     Arg::with_name("plot")
                         .short("p")
                         .long("plot")
-                        .takes_value(true)
-                        .required(true)
-                        .default_value("false")
-                        .possible_values(&["true", "false"])
-                        .help("Plot the diversity across windows of the alignment? Output is a PNG."),
+                        .help("Plot the diversity across windows of the alignment. Output is a PNG."),
                 )
         )
         .subcommand(
@@ -154,7 +142,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "[-]\tSubcommand invalid, run with '--help' or '-h' for subcommand options. Exiting."
+                "[-]\tRun with a subcommand, run with '--help' or '-h' for options. Exiting."
             );
             process::exit(1);
         }

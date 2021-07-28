@@ -2,15 +2,13 @@ pub mod tir {
 
     use bio::alignment::pairwise::*;
     use bio::io::fasta;
-    use clap::value_t;
     use std::iter::Peekable;
     // use this module to perform an alignment between consensus and itself (but revcomp)
     // might be swift evidence of a TIR.
 
     pub fn revcomp_alignment(matches: &clap::ArgMatches) {
         let fasta = matches.value_of("fasta").unwrap();
-        let show_alignment = value_t!(matches.value_of("show"), bool).unwrap_or_else(|e| e.exit());
-
+        let show_alignment = matches.is_present("show");
         // read number check
         let mut read_number = 0i32;
         let mut forward: Vec<u8> = Vec::new();

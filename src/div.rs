@@ -9,7 +9,7 @@ pub mod div {
         let fasta = matches.value_of("fasta").unwrap();
         let window_size = value_t!(matches.value_of("window"), usize).unwrap_or_else(|e| e.exit());
         let window_step = value_t!(matches.value_of("step"), usize).unwrap_or_else(|e| e.exit());
-        let plot = value_t!(matches.value_of("plot"), bool).unwrap_or_else(|e| e.exit());
+        let plot = matches.is_present("plot");
 
         let mut reader = fasta::Reader::from_file(fasta)
             .expect("[-]\tPath invalid.")

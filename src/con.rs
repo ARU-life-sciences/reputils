@@ -1,7 +1,6 @@
 pub mod con {
 
     use bio::io::fasta;
-    use clap::value_t;
     use std::collections::HashMap;
     use std::fmt::{Display, Error, Formatter};
 
@@ -11,7 +10,7 @@ pub mod con {
         // parse command line args
         let fasta = matches.value_of("fasta").unwrap();
         let name = matches.value_of("name").unwrap();
-        let append = value_t!(matches.value_of("append"), bool).unwrap_or_else(|e| e.exit());
+        let append = matches.is_present("append");
 
         // do some read length checks.
         // get the number of reads for free.
