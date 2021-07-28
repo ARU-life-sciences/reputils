@@ -7,7 +7,7 @@ use reputils::con::con::make_consensus;
 use reputils::div::div::diversity_windows;
 use reputils::tir::tir::revcomp_alignment;
 // use reputils::tsd::tsd::find_tsds;
-// use reputils::ttc::ttc::ttc;
+use reputils::ttc::ttc::ttc;
 
 fn main() {
     let matches = App::new("reputils")
@@ -107,18 +107,27 @@ fn main() {
                         .help("Plot the diversity across windows of the alignment? Output is a PNG."),
                 )
         )
-        // .subcommand(
-        //     clap::SubCommand::with_name("tsd")
-        //         .about("Determine possible target site duplications")
-        //         .arg(
-        //             Arg::with_name("fasta")
-        //                 .short("f")
-        //                 .long("fasta")
-        //                 .takes_value(true)
-        //                 .required(true)
-        //                 .help("The consensus sequence file in fasta format."),
-        //         )
-        // )
+        .subcommand(
+            clap::SubCommand::with_name("ttc")
+                .about("Trim an alignment to the core TE sequence.")
+                .arg(
+                    Arg::with_name("fasta")
+                        .short("f")
+                        .long("fasta")
+                        .takes_value(true)
+                        .required(true)
+                        .help("The multiple alignment sequence file in fasta format."),
+                )
+                .arg(
+                    Arg::with_name("extend")
+                        .short("e")
+                        .long("extend")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("10")
+                        .help("Extend the extracted alignment by `e` many bases either side of the alignment."),
+                )
+        )
         .get_matches();
 
     let subcommand = matches.subcommand();
@@ -139,10 +148,10 @@ fn main() {
         //     let matches = subcommand.1.unwrap();
         //     find_tsds(matches);
         // }
-        // "ttc" => {
-        //     let matches = subcommand.1.unwrap();
-        //     ttc(matches);
-        // }
+        "ttc" => {
+            let matches = subcommand.1.unwrap();
+            ttc(matches);
+        }
         _ => {
             eprintln!(
                 "[-]\tSubcommand invalid, run with '--help' or '-h' for subcommand options. Exiting."

@@ -7,7 +7,7 @@ Inspired by the TE workshop recently (run by Alex Suh). Designed to be used on f
 Everything is pretty much printed to stdout.
 
 ```
-reputils 0.1.0
+reputils 0.1.1
 Max Brown <mb39@sanger.ac.uk>
 reputils - some functions to aid TE discovery.
 
@@ -23,6 +23,7 @@ SUBCOMMANDS:
     div     Calculate diversity along sliding windows of an alignment.
     help    Prints this message or the help of the given subcommand(s)
     tir     Take a consensus and quickly check for terminal inverted repeats (TIR)
+    ttc     Trim an alignment to the core TE sequence.
 ```
 
 ### Make a consensus
@@ -87,6 +88,27 @@ FLAGS:
 OPTIONS:
     -f, --fasta <fasta>    The consensus sequence file in fasta format.
     -s, --show <show>      Pretty print the alignment? [default: false]  [possible values: true, false]
+```
+
+### Trim alignment to core TE sequence
+
+This script will take an alignment and trim it to the TE, plus any TSD's (hopefully). It needs a bit of testing, but worked on the Mariners I was looking at. TE's with 5' truncation may not work with this.
+
+```
+reputils-ttc 
+Trim an alignment to the core TE sequence.
+
+USAGE:
+    reputils ttc --extend <extend> --fasta <fasta>
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+OPTIONS:
+    -e, --extend <extend>    Extend the extracted alignment by `e` many bases either side of the alignment. [default:
+                             10]
+    -f, --fasta <fasta>      The multiple alignment sequence file in fasta format.
 ```
 
 TODO list:
