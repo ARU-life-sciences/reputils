@@ -1,4 +1,4 @@
-# Repeat sequence utilities
+# Repeat sequence utilities (reputils)
 
 Inspired by the TE workshop recently (run by Alex Suh). Designed to be used on files downstream of RepeatModeler2/RepeatMasker2. Might have some utility beyond this.
 
@@ -7,7 +7,7 @@ Inspired by the TE workshop recently (run by Alex Suh). Designed to be used on f
 Everything is pretty much printed to stdout.
 
 ```
-reputils 0.1.1
+reputils 0.1.2
 Max Brown <mb39@sanger.ac.uk>
 reputils - some functions to aid TE discovery.
 
@@ -109,10 +109,33 @@ OPTIONS:
     -f, --fasta <fasta>      The multiple alignment sequence file in fasta format.
 ```
 
+### Help to identify TSD's
+
+Looks at the either end of a *trimmed* alignment (must be trimmed). I don't know how useful this actually is (it might confuse things more). But here it is:
+
+```
+reputils-tsd 
+Try to find the Target Site Duplication of a TE. Prints a table.
+
+USAGE:
+    reputils tsd --fasta <fasta> --length <length> --maximum <maximum> --minimum <minimum>
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+OPTIONS:
+    -f, --fasta <fasta>        The multiple alignment sequence file in fasta format.
+    -l, --length <length>      Number of bases from beginning and end of alignment to query. [default: 20]
+    -x, --maximum <maximum>    TSD's are searched for <= to this length. [default: 12]
+    -m, --minimum <minimum>    TSD's are searched for >= to this length. [default: 2]
+
+```
+
 TODO list:
-- Check beginning & end of sequences for motif (probably hard to do and not worth it.)
 - Windows of diversity along alignment. Done.
 - Revcomp sequence & self align? Done
 - simple fasta stats of consensus sequences, sequence length, and length distribution (if multiple fastas).
 - Make consensus of a fasta. Done
-- Can we detect TSD's????
+- Can we detect TSD's???? Sort of.
+- Detect 5' truncation?

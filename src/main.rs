@@ -1,12 +1,10 @@
 use clap::{App, Arg};
 use std::process;
 
-// TODO list
-//  : alignment stats? Is that useful?
 use reputils::con::con::make_consensus;
 use reputils::div::div::diversity_windows;
 use reputils::tir::tir::revcomp_alignment;
-// use reputils::tsd::tsd::find_tsds;
+use reputils::tsd::tsd::find_tsds;
 use reputils::ttc::ttc::ttc;
 
 fn main() {
@@ -89,6 +87,22 @@ fn main() {
                         .help("The step size of the window to iterate over. If equal to window, then windows are non-overlapping."),
                 )
                 .arg(
+                    Arg::with_name("dir")
+                        .short("d")
+                        .long("dir")
+                        .takes_value(true)
+                        .default_value(".")
+                        .help("Directory to put plot in."),
+                )
+                .arg(
+                    Arg::with_name("name")
+                        .short("n")
+                        .long("name")
+                        .takes_value(true)
+                        .default_value("div_plot")
+                        .help("Name of the plot/PNG."),
+                )
+                .arg(
                     Arg::with_name("plot")
                         .short("p")
                         .long("plot")
@@ -116,6 +130,45 @@ fn main() {
                         .help("Extend the extracted alignment by `e` many bases either side of the alignment."),
                 )
         )
+        .subcommand(
+            clap::SubCommand::with_name("tsd")
+                .about("Try to find the Target Site Duplication of a TE. Prints a table.")
+                .arg(
+                    Arg::with_name("fasta")
+                        .short("f")
+                        .long("fasta")
+                        .takes_value(true)
+                        .required(true)
+                        .help("The multiple alignment sequence file in fasta format."),
+                )
+                .arg(
+                    Arg::with_name("length")
+                        .short("l")
+                        .long("length")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("20")
+                        .help("Number of bases from beginning and end of alignment to query."),
+                )
+                .arg(
+                    Arg::with_name("minimum")
+                        .short("m")
+                        .long("minimum")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("2")
+                        .help("TSD's are searched for >= to this length."),
+                )
+                .arg(
+                    Arg::with_name("maximum")
+                        .short("x")
+                        .long("maximum")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("12")
+                        .help("TSD's are searched for <= to this length."),
+                )
+        )
         .get_matches();
 
     let subcommand = matches.subcommand();
@@ -132,10 +185,10 @@ fn main() {
             let matches = subcommand.1.unwrap();
             diversity_windows(matches);
         }
-        // "tsd" => {
-        //     let matches = subcommand.1.unwrap();
-        //     find_tsds(matches);
-        // }
+        "tsd" => {
+            let matches = subcommand.1.unwrap();
+            find_tsds(matches);
+        }
         "ttc" => {
             let matches = subcommand.1.unwrap();
             ttc(matches);

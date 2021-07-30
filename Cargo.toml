@@ -1,6 +1,6 @@
 [package]
 name = "reputils"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Max Brown <mb39@sanger.ac.uk>"]
 edition = "2018"
 
@@ -10,6 +10,5 @@ edition = "2018"
 clap = "2.33.3"
 bio = "*"
 plotters = "*"
-streaming-stats = "0.1.28"
 itertools = "0.10.1"
 permutation = "0.2.5"

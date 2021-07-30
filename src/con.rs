@@ -4,6 +4,8 @@ pub mod con {
     use std::collections::HashMap;
     use std::fmt::{Display, Error, Formatter};
 
+    use crate::utils::alignment::{Alignment, Sequence};
+
     // with much help from https://github.com/Ninjani/rosalind/blob/master/s_cons/src/lib.rs
 
     pub fn make_consensus(matches: &clap::ArgMatches) {
@@ -34,46 +36,26 @@ pub mod con {
 
         // collect sequences into memory
         // should be fine for small(ish) alignments
-        let mut sequences = Vec::new();
+        let mut records = Alignment::new();
         for result in reader.records() {
             let record = result.expect("[-]\tError during fasta record parsing.");
             let id = record.id().to_owned();
             let sequence = record.seq().to_owned();
-            sequences.push((id, sequence));
+            records.add_sequence(Sequence { name: id, sequence });
         }
 
         // containing the frequencies of each nucleotide at each column
-        let profile = get_profile(sequences.clone());
+        let profile = records.get_profile();
         let consensus = get_consensus(profile, read_number);
 
         if append {
             println!(">{}\n{}", name, WriteSequence(consensus));
         } else {
-            for sequence in sequences {
-                println!(">{}\n{}", sequence.0, WriteSequence(sequence.1));
+            for record in records.matrix {
+                println!(">{}\n{}", record.name, WriteSequence(record.sequence));
             }
             println!(">{}\n{}", name, WriteSequence(consensus));
         }
-    }
-
-    // Get frequencies of each nucleotide at each position in a collection of sequences (profile)
-
-    fn get_profile(sequences: Vec<(String, Vec<u8>)>) -> Vec<HashMap<u8, usize>> {
-        // as all sequence lengths should be the same
-        let sequence_length = sequences[0].1.len();
-        let mut profile = Vec::with_capacity(sequence_length);
-        for i in 0..sequence_length {
-            let position_string = sequences
-                .iter()
-                .map(|(_id, sequence)| *sequence.iter().nth(i).unwrap())
-                .collect::<Vec<u8>>();
-            let mut profile_hash = HashMap::new();
-            for base in position_string {
-                *profile_hash.entry(base).or_insert(0) += 1;
-            }
-            profile.push(profile_hash);
-        }
-        profile
     }
 
     /// Get consensus sequence from a profile

@@ -3,91 +3,68 @@ pub mod div {
     use clap::value_t;
     use plotters::prelude::*;
 
-    // heavily poached from https://github.com/noahaus/sliding-window-scripts/blob/13d872b379a3501ca9b506f8bcccf89a9cd81c8d/tjd/src/main.rs
+    use crate::utils::alignment::{Alignment, Sequence};
 
     pub fn diversity_windows(matches: &clap::ArgMatches) {
         let fasta = matches.value_of("fasta").unwrap();
         let window_size = value_t!(matches.value_of("window"), usize).unwrap_or_else(|e| e.exit());
         let window_step = value_t!(matches.value_of("step"), usize).unwrap_or_else(|e| e.exit());
         let plot = matches.is_present("plot");
+        let dir = value_t!(matches.value_of("dir"), String).unwrap_or_else(|e| e.exit());
+        let name = value_t!(matches.value_of("name"), String).unwrap_or_else(|e| e.exit());
 
         let mut reader = fasta::Reader::from_file(fasta)
             .expect("[-]\tPath invalid.")
             .records();
 
-        let mut alignment = Vec::<String>::new();
+        let mut alignment = Alignment::new();
 
         while let Some(Ok(record)) = reader.next() {
-            alignment.push(std::str::from_utf8(record.seq()).unwrap().to_string());
+            // alignment.push(std::str::from_utf8(record.seq()).unwrap().to_string());
+            alignment.add_sequence(Sequence {
+                name: record.id().to_string(),
+                sequence: record.seq().to_vec(),
+            });
         }
 
-        let mut window = Vec::<String>::new(); // vector to store window
+        // let mut window = Vec::<String>::new(); // vector to store window
+        let mut window = Alignment::new();
         let mut start: usize = 0; // index to start the window
         let mut end: usize = start + window_size; // index to end the window
 
         let mut data = Vec::new();
 
-        while end <= alignment[0].len() {
-            for row in &alignment {
-                window.push(row[start..end].to_string());
+        while end <= alignment.matrix[0].len() {
+            for row in &alignment.matrix {
+                let seq = &row.sequence[start..end];
+                window.add_sequence(Sequence {
+                    name: row.name.clone(),
+                    sequence: seq.to_vec(),
+                });
             }
 
-            let pi = calculate_pi(&window);
+            let pi = window.calculate_pi();
             // window contains a vec of chunks.
             println!("{}\t{}\t{:.3}", start, end, pi);
             data.push((start, end, pi));
 
             start += window_step;
             end += window_step;
-            window.clear();
+
+            window.matrix.clear();
         }
 
         if plot {
             // do plot
-            plot_pi_windows(data).unwrap();
+            plot_pi_windows(data, &dir, &name).expect("Couldn't make the plot :(");
         }
     }
 
-    fn calculate_pi(alignment: &Vec<String>) -> f32 {
-        // number of sequences being analyzed
-        let align_length = alignment.len();
-        // vector that holds all the values of the pairwise distances
-        let mut distances = Vec::new();
-
-        // calculate hamming distance between two sequences at a time
-        for i in 0..align_length {
-            for j in 0..align_length {
-                if i < j {
-                    distances.push(hamming_distance(&alignment[i], &alignment[j]));
-                } else {
-                    continue;
-                }
-            }
-        }
-
-        // sum the pairwise distances and then divide by n(n-1)
-        let n = align_length as i32;
-        let dist_sum = distances.iter().sum::<i32>();
-        let np = ((n * (n - 1)) as f32) / 2.0;
-        dist_sum as f32 / np
-    }
-    // 2 given two string sequences, output the hamming distance between them
-    // ignore base pair comparisons where there is one or more dash, or N.
-
-    fn hamming_distance(seq1: &String, seq2: &String) -> i32 {
-        let mut distance = 0i32;
-
-        for (b1, b2) in seq1.as_bytes().iter().zip(seq2.as_bytes().iter()) {
-            if b1 != b2 && *b1 != 45u8 && *b2 != 45u8 && *b1 != 78u8 && *b2 != 78u8 {
-                distance += 1;
-            } else {
-                continue;
-            }
-        }
-        distance
-    }
-
-    fn plot_pi_windows(data: Vec<(usize, usize, f32)>) -> Result<(), Box<dyn std::error::Error>> {
+    fn plot_pi_windows(
+        data: Vec<(usize, usize, f32)>,
+        dir: &str,
+        name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // dimensions of the plot
         let dims = (1280, 2 * 480);
         // x from zero to length vec
@@ -99,7 +76,9 @@ pub mod div {
             .fold(0.0f32, |max, &val| if val > max { val } else { max });
         let xmax = data[data.len() - 1].0;
 
-        let root = BitMapBackend::new("./test.png", (dims.0, dims.1)).into_drawing_area();
+        let path = format!("{}/{}.png", dir, name);
+
+        let root = BitMapBackend::new(&path, (dims.0, dims.1)).into_drawing_area();
         root.fill(&WHITE)?;
         let root = root.margin(10, 10, 10, 10);
         // After this point, we should be able to draw construct a chart context
