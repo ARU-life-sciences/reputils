@@ -155,6 +155,8 @@ OPTIONS:
     -t, --wstep <wstep>          Window step size for window iterator. [default: 4]
 ```
 
+<img src="examples/BDGG01000017.1_186586-190792.png">
+
 TODO list:
 - simple fasta stats of consensus sequences, sequence length, and length distribution (if multiple fastas)?
 - Detect 5' truncation?
