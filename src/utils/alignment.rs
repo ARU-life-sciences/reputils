@@ -75,6 +75,7 @@ impl Alignment {
                 })
             }
         }
+        // println!("{}", blocks);
         blocks
     }
 

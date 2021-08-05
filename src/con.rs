@@ -48,7 +48,7 @@ pub mod con {
         let profile = records.get_profile();
         let consensus = get_consensus(profile, read_number);
 
-        if append {
+        if !append {
             println!(">{}\n{}", name, WriteSequence(consensus));
         } else {
             for record in records.matrix {

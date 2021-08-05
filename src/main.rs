@@ -3,6 +3,7 @@ use std::process;
 
 use reputils::con::con::make_consensus;
 use reputils::div::div::diversity_windows;
+use reputils::dot::dot::dot;
 use reputils::tir::tir::revcomp_alignment;
 use reputils::tsd::tsd::find_tsds;
 use reputils::ttc::ttc::ttc;
@@ -131,6 +132,54 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::SubCommand::with_name("dot")
+                .about("Make (self) dotplots from a fasta file. Suitable really only for short(ish) sequences.")
+                .arg(
+                    Arg::with_name("fasta")
+                        .short("f")
+                        .long("fasta")
+                        .takes_value(true)
+                        .required(true)
+                        .help("The multiple alignment sequence file in fasta format."),
+                )
+                .arg(
+                    Arg::with_name("wsize")
+                        .short("i")
+                        .long("wsize")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("10")
+                        .help("Window size to iterate over sequence."),
+                )
+                .arg(
+                    Arg::with_name("wstep")
+                        .short("t")
+                        .long("wstep")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("4")
+                        .help("Window step size for window iterator."),
+                )
+                .arg(
+                    Arg::with_name("nmatches")
+                        .short("n")
+                        .long("nmatches")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("1")
+                        .help("Number of matches to tolerate a positive match."),
+                )
+                .arg(
+                    Arg::with_name("dir")
+                        .short("d")
+                        .long("dir")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("dot")
+                        .help("Dirname where output plots should go."),
+                )
+        )
+        .subcommand(
             clap::SubCommand::with_name("tsd")
                 .about("Try to find the Target Site Duplication of a TE. Prints a table.")
                 .arg(
@@ -192,6 +241,10 @@ fn main() {
         "ttc" => {
             let matches = subcommand.1.unwrap();
             ttc(matches);
+        }
+        "dot" => {
+            let matches = subcommand.1.unwrap();
+            dot(matches).unwrap();
         }
         _ => {
             eprintln!(

@@ -4,10 +4,10 @@ Inspired by the TE workshop recently (run by Alex Suh). Designed to be used on f
 
 ## Usage
 
-Everything is pretty much printed to stdout.
+Everything is pretty much printed to stdout or to a PNG.
 
 ```
-reputils 0.1.2
+reputils 0.1.3
 Max Brown <mb39@sanger.ac.uk>
 reputils - some functions to aid TE discovery.
 
@@ -132,10 +132,29 @@ OPTIONS:
 
 ```
 
+### Dotplot of sequences
+
+Takes a fasta file and self compares each sequence.
+
+```
+reputils-dot 
+Make (self) dotplots from a fasta file. Suitable really only for short(ish) sequences.
+
+USAGE:
+    reputils dot --dir <dir> --fasta <fasta> --nmatches <nmatches> --wsize <wsize> --wstep <wstep>
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+OPTIONS:
+    -d, --dir <dir>              Dirname where output plots should go. [default: dot]
+    -f, --fasta <fasta>          The multiple alignment sequence file in fasta format.
+    -n, --nmatches <nmatches>    Number of matches to tolerate a positive match. [default: 1]
+    -i, --wsize <wsize>          Window size to iterate over sequence. [default: 10]
+    -t, --wstep <wstep>          Window step size for window iterator. [default: 4]
+```
+
 TODO list:
-- Windows of diversity along alignment. Done.
-- Revcomp sequence & self align? Done
-- simple fasta stats of consensus sequences, sequence length, and length distribution (if multiple fastas).
-- Make consensus of a fasta. Done
-- Can we detect TSD's???? Sort of.
+- simple fasta stats of consensus sequences, sequence length, and length distribution (if multiple fastas)?
 - Detect 5' truncation?
