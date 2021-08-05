@@ -6,6 +6,10 @@ pub mod dot {
 
     use crate::utils::windows::SeqWindows;
 
+    // the code here is based on the laconic R version here:
+    // https://github.com/cran/seqinr/blob/master/R/dotPlot.R
+    // It's not an optimal algorithm by any stretch
+
     pub fn dot(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::error::Error + 'static>> {
         // load in the fasta
         let fasta = matches.value_of("fasta").unwrap();
@@ -35,7 +39,6 @@ pub mod dot {
             // compare windows to themselves
             for row in 0..no_its {
                 for column in 0..no_its {
-                    // both of these should never panic.
                     // base or kmer 1
                     let k1 = seq_windows_vec[row];
                     // base or kmer 2
@@ -54,7 +57,8 @@ pub mod dot {
         name: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let path = format!("{}/{}.png", dir, name);
-        let root = BitMapBackend::new(&path, (1024, 768)).into_drawing_area();
+        let dim = 1024u32;
+        let root = BitMapBackend::new(&path, (dim, dim)).into_drawing_area();
 
         root.fill(&WHITE)?;
 
@@ -110,8 +114,10 @@ pub mod dot {
         // if kmer1 or kmer2 contains a N or - skip?
         if kmer1.contains(&45u8)
             || kmer2.contains(&45u8)
+            // little n
             || kmer1.contains(&110u8)
             || kmer2.contains(&110u8)
+            // big N
             || kmer1.contains(&78u8)
             || kmer2.contains(&78u8)
         {
