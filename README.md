@@ -1,10 +1,21 @@
 # Repeat sequence utilities (reputils)
 
-Inspired by the TE workshop recently (run by Alex Suh). Designed to be used on files downstream of RepeatModeler2/RepeatMasker2. Might have some utility beyond this.
+Help identify transposable elements (TE's) in manual curation by bringing together several lines of evidence. The input is mainly an alignment of a consensus TE sequence which has been blasted against the original genome, and aligned. These alignments are often fragmented and gappy.
 
-TODO: make a html output document for an input alignment.
+The program of greatest use is probably `reputils html`. It brings together all of the functionality so far implemented into a single html document.
 
 ## Usage
+
+Building <a href="https://www.rust-lang.org/tools/install">requires Rust</a>. 
+
+```bash
+git clone https://github.com/tolkit/reputils
+cd reputils
+cargo build --release
+# ./target/release/reputils is the executable
+# show help
+./target/release/reputils --help
+```
 
 Everything is pretty much printed to stdout or to a PNG.
 
@@ -33,7 +44,7 @@ SUBCOMMANDS:
 
 ### HTML overview
 
-Combines all of the other functions so far into a single HTML document. See the `/examples` folder for an example.
+Combines all of the other functions so far into a single HTML document. See the `/examples` folder for an example. To see it in action, go <a href="https://htmlpreview.github.io/?https://github.com/tolkit/reputils/blob/main/examples/example.html"><b>here</b></a>.
 
 ```
 reputils-html 
@@ -203,6 +214,11 @@ OPTIONS:
 
 <img src="examples/BDGG01000017.1_186586-190792.png">
 
-TODO list:
+### Performance
+
+Performance will take a dip with large sequences (>10/100kb), especially `reputils dot`. If you want massive dotplots, there are many other more efficient programs out there!
+
+### TODO's
+
 - simple fasta stats of consensus sequences, sequence length, and length distribution (if multiple fastas)?
 - Detect 5' truncation?
