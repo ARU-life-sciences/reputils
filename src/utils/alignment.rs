@@ -39,7 +39,7 @@ impl Alignment {
         self.matrix.clear()
     }
 
-    pub fn find_blocks(&self) -> BlockRecords {
+    pub fn find_blocks(&self, miss: f64, iden: f64) -> BlockRecords {
         let t = Self::transpose(&self);
 
         let mut blocks: BlockRecords = BlockRecords(Vec::new());
@@ -67,7 +67,7 @@ impl Alignment {
 
             // add a block IF
             // missing (dashes) below 0.1 AND column should be 0.9 identical.
-            if per_missing < 0.1 && per_identity > 0.9 {
+            if per_missing < miss && per_identity > iden {
                 blocks.add_record(BlockRecord {
                     position,
                     identity: per_identity,
@@ -90,6 +90,44 @@ impl Alignment {
                     .collect::<Vec<u8>>()
             })
             .collect()
+    }
+
+    pub fn div_windows(
+        &self,
+        window_size: usize,
+        window_step: usize,
+        internal: bool,
+    ) -> Vec<(usize, usize, f32)> {
+        // let mut window = Vec::<String>::new(); // vector to store window
+        let mut window = Alignment::new();
+        let mut start: usize = 0; // index to start the window
+        let mut end: usize = start + window_size; // index to end the window
+
+        let mut data = Vec::new();
+
+        while end <= self.matrix[0].len() {
+            for row in &self.matrix {
+                let seq = &row.sequence[start..end];
+                window.add_sequence(Sequence {
+                    name: row.name.clone(),
+                    sequence: seq.to_vec(),
+                });
+            }
+
+            let pi = window.calculate_pi();
+            // window contains a vec of chunks.
+            if !internal {
+                println!("{}\t{}\t{:.3}", start, end, pi);
+            }
+            data.push((start, end, pi));
+
+            start += window_step;
+            end += window_step;
+
+            window.clear();
+        }
+
+        data
     }
 
     // heavily poached from https://github.com/noahaus/sliding-window-scripts/blob/13d872b379a3501ca9b506f8bcccf89a9cd81c8d/tjd/src/main.rs
@@ -228,7 +266,7 @@ impl TSDHash {
     // some more work to do here;
     // if the smaller 'tsd's' are substrings of a larger
     // they can be removed (they're redundant.)
-    pub fn merge(&self) {
+    pub fn merge(&self, internal: bool) -> Option<HashMap<String, Vec<String>>> {
         let mut res = Vec::new();
         for hash in &self.0 {
             // merge left and right hashmaps
@@ -275,12 +313,18 @@ impl TSDHash {
             grouped_id_no_substr.insert(k, no_substr);
         }
 
-        println!("Table of potential TSD's");
-        println!("ID\tLength\tTSD's");
-        for (id, tsds) in grouped_id_no_substr {
-            if !tsds.is_empty() {
-                println!("{}\t{}", id, tsds.join("\t"));
+        if internal {
+            Some(grouped_id_no_substr)
+        } else {
+            // for command line printing only.
+            println!("Table of potential TSD's");
+            println!("ID\tLength\tTSD's");
+            for (id, tsds) in grouped_id_no_substr {
+                if !tsds.is_empty() {
+                    println!("{}\t{}", id, tsds.join("\t"));
+                }
             }
+            None
         }
     }
 

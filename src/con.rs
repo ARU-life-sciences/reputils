@@ -59,7 +59,7 @@ pub mod con {
     }
 
     /// Get consensus sequence from a profile
-    fn get_consensus(profile: Vec<HashMap<u8, usize>>, read_number: i32) -> Vec<u8> {
+    pub fn get_consensus(profile: Vec<HashMap<u8, usize>>, read_number: i32) -> Vec<u8> {
         // initiate consensus
         let mut consensus = Vec::with_capacity(profile.len());
 

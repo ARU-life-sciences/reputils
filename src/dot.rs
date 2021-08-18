@@ -9,6 +9,7 @@ pub mod dot {
     // the code here is based on the laconic R version here:
     // https://github.com/cran/seqinr/blob/master/R/dotPlot.R
     // It's not an optimal algorithm by any stretch
+    // remove gaps?
 
     pub fn dot(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::error::Error + 'static>> {
         // load in the fasta
@@ -22,6 +23,8 @@ pub mod dot {
 
         for record in reader.records() {
             let record = record.expect("[-]\tError during fasta record parsing.");
+
+            // future Max filter out these gaps please
             let seq_counter = SeqWindows::new(record.seq(), wsize, wstep);
             let no_its = seq_counter.count();
 
@@ -46,7 +49,14 @@ pub mod dot {
                     matrix[row][column] = match_case(k1, k2, nmatch)
                 }
             }
+            eprintln!("Matrix for {} made.", record.id());
+
             matplot(matrix, &dir, record.id())?;
+
+            match dir.as_str() {
+                "." => eprintln!("Plot for {} made in current directory", record.id()),
+                d => eprintln!("Plot for {} made in {}", record.id(), d),
+            }
         }
         Ok(())
     }
@@ -64,14 +74,10 @@ pub mod dot {
 
         let mut chart = ChartBuilder::on(&root)
             .margin(5)
-            .top_x_label_area_size(40)
-            .y_label_area_size(40)
             .build_cartesian_2d(0i32..(matrix.len() as i32), (matrix.len() as i32)..0i32)?;
 
         chart
             .configure_mesh()
-            .x_labels(15)
-            .y_labels(15)
             .x_label_offset(35)
             .y_label_offset(25)
             .disable_x_mesh()
@@ -85,33 +91,23 @@ pub mod dot {
                 .zip(0..)
                 .map(|(l, y)| l.iter().zip(0..).map(move |(v, x)| (x as i32, y as i32, v)))
                 .flatten()
-                .map(|(x, y, v)| {
-                    Rectangle::new(
-                        [(x, y), (x + 1, y + 1)],
-                        RGBColor(
-                            match v {
-                                true => 0u8,
-                                false => 255u8,
-                            },
-                            match v {
-                                true => 0u8,
-                                false => 255u8,
-                            },
-                            match v {
-                                true => 0u8,
-                                false => 255u8,
-                            },
-                        )
-                        .filled(),
-                    )
+                .filter_map(|(x, y, v)| {
+                    // drawing white and black
+                    match v {
+                        false => None,
+                        true => Some(Rectangle::new(
+                            [(x, y), (x + 1, y + 1)],
+                            RGBColor(0u8, 0u8, 0u8).filled(),
+                        )),
+                    }
                 }),
         )?;
 
         Ok(())
     }
 
-    fn match_case<'a>(kmer1: &'a [u8], kmer2: &'a [u8], nmatch: usize) -> bool {
-        // if kmer1 or kmer2 contains a N or - skip?
+    pub fn match_case<'a>(kmer1: &'a [u8], kmer2: &'a [u8], nmatch: usize) -> bool {
+        // if kmer1 or kmer2 contains a N or - or ? skip?
         if kmer1.contains(&45u8)
             || kmer2.contains(&45u8)
             // little n
@@ -120,6 +116,9 @@ pub mod dot {
             // big N
             || kmer1.contains(&78u8)
             || kmer2.contains(&78u8)
+            // ?
+            || kmer1.contains(&63u8)
+            || kmer2.contains(&63u8)
         {
             return false;
         }

@@ -27,32 +27,7 @@ pub mod div {
             });
         }
 
-        // let mut window = Vec::<String>::new(); // vector to store window
-        let mut window = Alignment::new();
-        let mut start: usize = 0; // index to start the window
-        let mut end: usize = start + window_size; // index to end the window
-
-        let mut data = Vec::new();
-
-        while end <= alignment.matrix[0].len() {
-            for row in &alignment.matrix {
-                let seq = &row.sequence[start..end];
-                window.add_sequence(Sequence {
-                    name: row.name.clone(),
-                    sequence: seq.to_vec(),
-                });
-            }
-
-            let pi = window.calculate_pi();
-            // window contains a vec of chunks.
-            println!("{}\t{}\t{:.3}", start, end, pi);
-            data.push((start, end, pi));
-
-            start += window_step;
-            end += window_step;
-
-            window.matrix.clear();
-        }
+        let data = alignment.div_windows(window_size, window_step, false);
 
         if plot {
             // do plot

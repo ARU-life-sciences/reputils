@@ -4,6 +4,7 @@ use std::process;
 use reputils::con::con::make_consensus;
 use reputils::div::div::diversity_windows;
 use reputils::dot::dot::dot;
+use reputils::html::html::render_html;
 use reputils::tir::tir::revcomp_alignment;
 use reputils::tsd::tsd::find_tsds;
 use reputils::ttc::ttc::ttc;
@@ -12,7 +13,115 @@ fn main() {
     let matches = App::new("reputils")
         .version(clap::crate_version!())
         .author("Max Brown <mb39@sanger.ac.uk>")
-        .about("reputils - some functions to aid TE discovery.")
+        .about("reputils - some functions to aid TE identification.")
+        .subcommand(
+            clap::SubCommand::with_name("html")
+                .about("Render an HTML to gather several lines of identification evidence for a TE.")
+                .arg(
+                    Arg::with_name("fasta")
+                        .short("f")
+                        .long("fasta")
+                        .takes_value(true)
+                        .required(true)
+                        .help("The multiple alignment file in fasta format."),
+                )
+                .arg(
+                    Arg::with_name("trim_extend")
+                        .long("trim_extend")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("30")
+                        .help("Extend alingment either end by number of bases specified."),
+                )
+                .arg(
+                    Arg::with_name("trim_next_hit")
+                        .long("trim_next_hit")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("1")
+                        .help("Isolated hits of well conserved columns leads to bad trimming. Play with this number?"),
+                )
+                .arg(
+                    Arg::with_name("trim_miss")
+                        .long("trim_miss")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("0.1")
+                        .help("% missing data tolerated in a column."),
+                )
+                .arg(
+                    Arg::with_name("trim_iden")
+                        .long("trim_iden")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("0.85")
+                        .help("% identity in a column for the column to be considered a hit."),
+                )
+                .arg(
+                    Arg::with_name("dot_wsize")
+                        .long("dot_wsize")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("10")
+                        .help("Window size to iterate over sequence."),
+                )
+                .arg(
+                    Arg::with_name("dot_wstep")
+                        .long("dot_wstep")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("3")
+                        .help("Window step size for window iterator."),
+                )
+                .arg(
+                    Arg::with_name("dot_nmatch")
+                        .long("dot_nmatch")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("1")
+                        .help("Number of matches to tolerate a positive match."),
+                )
+                .arg(
+                    Arg::with_name("tsd_len")
+                        .long("tsd_len")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("30")
+                        .help("Number of bases from beginning or end of alignment to query."),
+                )
+                .arg(
+                    Arg::with_name("tsd_min_window")
+                        .long("tsd_min_window")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("2")
+                        .help("TSD's are searched for >= to this length."),
+                )
+                .arg(
+                    Arg::with_name("tsd_max_window")
+                        .long("tsd_min_window")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("12")
+                        .help("TSD's are searched for <= to this length."),
+                )
+                .arg(
+                    Arg::with_name("div_window_size")
+                        .long("div_window_size")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("10")
+                        .help("The size of the window to iterate over."),
+                )
+                .arg(
+                    Arg::with_name("div_window_step")
+                        .long("div_window_step")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("3")
+                        .help("The step size of the window to iterate over. If equal to window, then windows are non-overlapping."),
+                )
+        )
         .subcommand(
             clap::SubCommand::with_name("con")
                 .about("Make a consensus out of a multiple alignment fasta. Optimised for TE's.")
@@ -127,8 +236,35 @@ fn main() {
                         .long("extend")
                         .takes_value(true)
                         .required(true)
-                        .default_value("10")
+                        .default_value("15")
                         .help("Extend the extracted alignment by `e` many bases either side of the alignment."),
+                )
+                .arg(
+                    Arg::with_name("next_hit")
+                        .short("n")
+                        .long("next_hit")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("1")
+                        .help("Isolated hits of well conserved columns leads to bad trimming. Play with this number?"),
+                )
+                .arg(
+                    Arg::with_name("missing")
+                        .short("m")
+                        .long("missing")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("0.1")
+                        .help("% missing data tolerated in a column."),
+                )
+                .arg(
+                    Arg::with_name("identity")
+                        .short("i")
+                        .long("identity")
+                        .takes_value(true)
+                        .required(true)
+                        .default_value("0.8")
+                        .help("% identity in a column for the column to be considered a hit."),
                 )
         )
         .subcommand(
@@ -197,7 +333,7 @@ fn main() {
                         .takes_value(true)
                         .required(true)
                         .default_value("20")
-                        .help("Number of bases from beginning and end of alignment to query."),
+                        .help("Number of bases from beginning or end of alignment to query."),
                 )
                 .arg(
                     Arg::with_name("minimum")
@@ -245,6 +381,10 @@ fn main() {
         "dot" => {
             let matches = subcommand.1.unwrap();
             dot(matches).unwrap();
+        }
+        "html" => {
+            let matches = subcommand.1.unwrap();
+            render_html(matches);
         }
         _ => {
             eprintln!(

@@ -35,6 +35,6 @@ pub mod tsd {
         // prints a table
         alignment
             .to_tsd_hash(length, min_window, max_window)
-            .merge();
+            .merge(false);
     }
 }

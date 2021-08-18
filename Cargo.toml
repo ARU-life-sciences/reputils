@@ -1,6 +1,6 @@
 [package]
 name = "reputils"
-version = "0.1.3"
+version = "0.2.0"
 authors = ["Max Brown <mb39@sanger.ac.uk>"]
 edition = "2018"
 

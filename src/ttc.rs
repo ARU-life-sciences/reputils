@@ -11,6 +11,9 @@ pub mod ttc {
     pub fn ttc(matches: &clap::ArgMatches) {
         let fasta = matches.value_of("fasta").unwrap();
         let extend = value_t!(matches.value_of("extend"), usize).unwrap_or_else(|e| e.exit());
+        let next_hit = value_t!(matches.value_of("next_hit"), usize).unwrap_or_else(|e| e.exit());
+        let miss = value_t!(matches.value_of("missing"), f64).unwrap_or_else(|e| e.exit());
+        let iden = value_t!(matches.value_of("identity"), f64).unwrap_or_else(|e| e.exit());
 
         let reader = fasta::Reader::from_file(fasta).expect("[-]\tPath invalid.");
 
@@ -25,7 +28,7 @@ pub mod ttc {
         }
 
         // find the blocks and trim
-        let blocks = matrix.find_blocks();
-        blocks.trim(matrix, extend);
+        let blocks = matrix.find_blocks(miss, iden);
+        blocks.trim(matrix, extend, next_hit, false);
     }
 }
