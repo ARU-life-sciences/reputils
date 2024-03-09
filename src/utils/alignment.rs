@@ -17,6 +17,10 @@ impl Sequence {
     pub fn len(&self) -> usize {
         self.sequence.len()
     }
+    // an is_empty method for Sequence
+    pub fn is_empty(&self) -> bool {
+        self.sequence.is_empty()
+    }
 }
 
 /// Alignment loads all the Sequences
@@ -40,7 +44,7 @@ impl Alignment {
     }
 
     pub fn find_blocks(&self, miss: f64, iden: f64) -> BlockRecords {
-        let t = Self::transpose(&self);
+        let t = Self::transpose(self);
 
         let mut blocks: BlockRecords = BlockRecords(Vec::new());
         for (position, column) in t.iter().enumerate() {
@@ -53,8 +57,7 @@ impl Alignment {
             // percent identical. bad error handling here.
             let identity = table
                 .iter()
-                .max_by(|a, b| a.1.cmp(&b.1))
-                .map(|(k, v)| (k, v))
+                .max_by(|a, b| a.1.cmp(b.1))
                 .unwrap_or((&&0u8, &0i32));
             let per_identity = {
                 if identity.0 == &&45u8 {
@@ -84,11 +87,7 @@ impl Alignment {
         let v = &self.matrix;
         assert!(!v.is_empty());
         (0..v[0].len())
-            .map(|i| {
-                v.iter()
-                    .map(|inner| inner.sequence[i].clone())
-                    .collect::<Vec<u8>>()
-            })
+            .map(|i| v.iter().map(|inner| inner.sequence[i]).collect::<Vec<u8>>())
             .collect()
     }
 
@@ -162,7 +161,7 @@ impl Alignment {
     // 2 given two string sequences, output the hamming distance between them
     // ignore base pair comparisons where there is one or more dash, or N.
 
-    fn hamming_distance(seq1: &Vec<u8>, seq2: &Vec<u8>) -> i32 {
+    fn hamming_distance(seq1: &[u8], seq2: &[u8]) -> i32 {
         let mut distance = 0i32;
 
         for (b1, b2) in seq1.iter().zip(seq2.iter()) {
@@ -185,7 +184,7 @@ impl Alignment {
             let position_string = self
                 .matrix
                 .iter()
-                .map(|record| *record.sequence.iter().nth(i).unwrap())
+                .map(|record| *record.sequence.get(i).unwrap())
                 .collect::<Vec<u8>>();
             let mut profile_hash = HashMap::new();
             for base in position_string {
@@ -302,7 +301,7 @@ impl TSDHash {
             for s1_i in 0..v.len() {
                 let mut substring_found = false;
                 for s2 in &v {
-                    if &v[s1_i] != s2 && s2.find(&v[s1_i]).is_some() {
+                    if &v[s1_i] != s2 && s2.contains(&v[s1_i]) {
                         substring_found = true;
                     }
                 }

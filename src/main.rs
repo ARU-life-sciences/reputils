@@ -1,13 +1,13 @@
 use clap::{App, Arg};
 use std::process;
 
-use reputils::con::con::make_consensus;
-use reputils::div::div::diversity_windows;
-use reputils::dot::dot::dot;
-use reputils::html::html::render_html;
-use reputils::tir::tir::revcomp_alignment;
-use reputils::tsd::tsd::find_tsds;
-use reputils::ttc::ttc::ttc;
+use reputils::con::make_consensus;
+use reputils::div::diversity_windows;
+use reputils::dot::dot;
+use reputils::html::render_html;
+use reputils::tir::revcomp_alignment;
+use reputils::tsd::find_tsds;
+use reputils::ttc::ttc;
 
 fn main() {
     let matches = App::new("reputils")

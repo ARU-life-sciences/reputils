@@ -63,20 +63,18 @@ impl BlockRecords {
             // more guarding needed here
             let seq_length = seq.sequence.len();
             // calculate new starts and ends
-            let new_start: usize;
-            let new_end: usize;
 
-            if start - extend <= 0 {
-                new_start = 0;
+            let new_start = if start - extend == 0 {
+                0
             } else {
-                new_start = start - extend;
-            }
+                start - extend
+            };
 
-            if end + extend >= seq_length {
-                new_end = seq_length;
+            let new_end = if end + extend >= seq_length {
+                seq_length
             } else {
-                new_end = end + extend;
-            }
+                end + extend
+            };
 
             let trimmed_seq = seq.sequence.get(new_start..new_end);
 
@@ -125,13 +123,13 @@ impl BlockRecords {
             }
 
             let val = *self.0.get(index).unwrap(); // should never panic.
-            let left_val;
+
             // guard against indexing out of range
-            if index == 0 {
-                left_val = self.0.get(index);
+            let left_val = if index == 0 {
+                self.0.get(index)
             } else {
-                left_val = self.0.get(index - 1);
-            }
+                self.0.get(index - 1)
+            };
 
             // no need to guard here as the break should have it covered
             let right_val = self.0.get(index + 1);
