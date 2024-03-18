@@ -1,4 +1,3 @@
-
 use bio::io::fasta;
 use clap::value_t;
 use plotters::prelude::*;
@@ -88,8 +87,7 @@ fn matplot(
         matrix
             .iter()
             .zip(0..)
-            .map(|(l, y)| l.iter().zip(0..).map(move |(v, x)| (x as i32, y as i32, v)))
-            .flatten()
+            .flat_map(|(l, y)| l.iter().zip(0..).map(move |(v, x)| (x, y, v)))
             .filter_map(|(x, y, v)| {
                 // drawing white and black
                 match v {

@@ -96,7 +96,7 @@ pub fn render_html(matches: &clap::ArgMatches) {
 
     let seq_windows = SeqWindows::new(&consensus, dot_wsize, dot_wstep);
 
-    let seq_windows_vec: Vec<&[u8]> = seq_windows.map(|s| s).collect();
+    let seq_windows_vec: Vec<&[u8]> = seq_windows.collect();
 
     // Base 1d array
     let mut matrix_raw = vec![false; no_its * no_its];
@@ -167,24 +167,24 @@ pub fn render_html(matches: &clap::ArgMatches) {
 
     // merge every third entry in vec
     // kind of annoying really; probably be better to modify the actual rust bio api.
-    let ali_print_parts: Vec<&str> = alignment_pretty.split("\n").collect();
+    let ali_print_parts: Vec<&str> = alignment_pretty.split('\n').collect();
     let ali_print_parts_f: Vec<&str> = ali_print_parts
         .iter()
-        .filter(|e| **e != "")
+        .filter(|e| !e.is_empty())
         .enumerate()
         .filter_map(|(i, e)| if i % 3 == 0 { Some(*e) } else { None })
         .collect();
 
     let ali_print_parts_m: Vec<&str> = ali_print_parts
         .iter()
-        .filter(|e| **e != "")
+        .filter(|e| !e.is_empty())
         .enumerate()
         .filter_map(|(i, e)| if i % 3 == 1 { Some(*e) } else { None })
         .collect();
 
     let ali_print_parts_r: Vec<&str> = ali_print_parts
         .iter()
-        .filter(|e| **e != "")
+        .filter(|e| !e.is_empty())
         .enumerate()
         .filter_map(|(i, e)| if i % 3 == 2 { Some(*e) } else { None })
         .collect();
@@ -271,13 +271,13 @@ pub fn render_html(matches: &clap::ArgMatches) {
         for i in 0..max_tsd_lens {
             if i == 0 {
                 match tsds.get(i) {
-                    Some(x) => tsd_string += &format!("{}", x.to_ascii_uppercase()),
-                    None => tsd_string += &format!("<i>None detected</i>"),
+                    Some(x) => tsd_string += &x.to_ascii_uppercase().to_string(),
+                    None => tsd_string += "<i>None detected</i>",
                 }
             } else {
                 match tsds.get(i) {
                     Some(x) => tsd_string += &format!(", {}", x.to_ascii_uppercase()),
-                    None => tsd_string += &format!(""),
+                    None => tsd_string += "",
                 }
             }
         }

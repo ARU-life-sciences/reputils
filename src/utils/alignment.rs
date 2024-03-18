@@ -17,9 +17,9 @@ impl Sequence {
     pub fn len(&self) -> usize {
         self.sequence.len()
     }
-    // an is_empty method for Sequence
+    #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.sequence.is_empty()
+        self.len() == 0
     }
 }
 

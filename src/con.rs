@@ -1,4 +1,3 @@
-
 use bio::io::fasta;
 use std::collections::HashMap;
 use std::fmt::{Display, Error, Formatter};
