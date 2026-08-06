@@ -3,7 +3,7 @@
     {
       "id": "ltr-retroelement",
       "patterns": ["integrase", "gag", "retroviral protease"],
-      "te_associated": true,
+      "association": "te-associated",
       "architecture_hint": "ltr-like",
       "warning_code": null,
       "warning_message": null
@@ -11,7 +11,7 @@
     {
       "id": "tir-transposase",
       "patterns": ["transposase", "dde", "d d e"],
-      "te_associated": true,
+      "association": "te-associated",
       "architecture_hint": "tir-like",
       "warning_code": null,
       "warning_message": null
@@ -19,10 +19,18 @@
     {
       "id": "review-host-kinase",
       "patterns": ["protein kinase", "PF00069"],
-      "te_associated": false,
+      "association": "host-enriched",
       "architecture_hint": null,
       "warning_code": "possible_host_gene",
       "warning_message": "A configured host-like kinase domain requires curator review"
+    },
+    {
+      "id": "ubiquitous-helicase-review",
+      "patterns": ["generic helicase"],
+      "association": "ubiquitous",
+      "architecture_hint": null,
+      "warning_code": null,
+      "warning_message": null
     }
   ]
 }

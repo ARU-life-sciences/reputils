@@ -1,0 +1,25 @@
+{
+  "schema_version": "reputils.curation-benchmark.v1",
+  "source": "replace with a description of the independent curator review",
+  "families": [
+    {
+      "family_id": "example-family",
+      "result_json": "../curated-family/result.json",
+      "accepted_left": {
+        "minimum_1based": 91,
+        "maximum_1based": 96
+      },
+      "accepted_right": {
+        "minimum_1based": 1240,
+        "maximum_1based": 1245
+      },
+      "accepted_architectures": [
+        "tir-like"
+      ],
+      "warning_labels": {
+        "possible_mixed_subfamilies": false,
+        "possible_host_gene": true
+      }
+    }
+  ]
+}
