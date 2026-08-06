@@ -373,7 +373,9 @@ fn main() {
                 .arg(Arg::with_name("getorf").long("getorf").takes_value(true).help("getorf executable path; also REPUTILS_GETORF."))
                 .arg(Arg::with_name("domain_rules").long("domain-rules").takes_value(true).help("Optional JSON domain interpretation rule file."))
                 .arg(Arg::with_name("boundary_override").long("boundary-override").takes_value(true).help("Apply a reputils.curation-override.v1 JSON boundary override."))
+                .arg(Arg::with_name("confidence_calibration").long("confidence-calibration").takes_value(true).help("Optional labeled reputils.confidence-calibration.v1 JSON table."))
                 .arg(Arg::with_name("scan_selected_copies").long("scan-selected-copies").help("Also scan selected genomic copies for protein domains."))
+                .arg(Arg::with_name("split_subfamilies").long("split-subfamilies").help("Emit additional consensuses only for strongly supported candidate subfamilies."))
                 .arg(Arg::with_name("max_copy_domain_targets").long("max-copy-domain-targets").takes_value(true).default_value("10").help("Maximum selected copies searched for domains."))
                 .arg(Arg::with_name("min_copies").long("min-copies").takes_value(true).default_value("3"))
                 .arg(Arg::with_name("force").long("force").help("Replace known curation output files in an existing directory."))
@@ -407,7 +409,9 @@ fn main() {
                 getorf: path("getorf"),
                 domain_rules: path("domain_rules"),
                 boundary_override: path("boundary_override"),
+                confidence_calibration: path("confidence_calibration"),
                 scan_selected_copies: matches.is_present("scan_selected_copies"),
+                split_subfamilies: matches.is_present("split_subfamilies"),
                 max_copy_domain_targets: matches
                     .value_of("max_copy_domain_targets")
                     .unwrap()

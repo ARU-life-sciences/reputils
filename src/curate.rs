@@ -905,6 +905,18 @@ pub struct SubfamilyEvidence {
     pub support_for_splitting: f64,
     pub insufficient_pairs: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubfamilyConsensus {
+    pub cluster_id: String,
+    pub members: Vec<String>,
+    pub selected_members: Vec<String>,
+    pub consensus: RefinedConsensus,
+    pub split_support: f64,
+    pub confidence_tier: ConfidenceTier,
+    pub consensus_file: String,
+    pub alignment_file: String,
+}
 #[allow(clippy::needless_range_loop)]
 pub fn subfamily_analysis(alignment: &Alignment, minimum_overlap: usize) -> SubfamilyEvidence {
     let n = alignment.len();
@@ -994,6 +1006,90 @@ pub fn subfamily_analysis(alignment: &Alignment, minimum_overlap: usize) -> Subf
         support_for_splitting: support,
         insufficient_pairs: insufficient,
     }
+}
+fn build_subfamily_consensuses(
+    alignment: &Alignment,
+    metrics: &[CopyMetrics],
+    boundary: &BoundaryResult,
+    evidence: &SubfamilyEvidence,
+    minimum_cluster_copies: usize,
+    out: &Path,
+) -> Vec<SubfamilyConsensus> {
+    let separated = match (
+        evidence.mean_within_cluster_distance,
+        evidence.mean_between_cluster_distance,
+    ) {
+        (Some(within), Some(between)) => between >= within + 0.05,
+        _ => false,
+    };
+    if evidence.candidate_clusters < 2 || evidence.support_for_splitting < 0.50 || !separated {
+        return Vec::new();
+    }
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (index, copy) in alignment.copies().iter().enumerate() {
+        if let Some(cluster) = evidence.cluster_membership.get(&copy.id) {
+            groups.entry(*cluster).or_default().push(index);
+        }
+    }
+    if groups
+        .values()
+        .any(|members| members.len() < minimum_cluster_copies)
+    {
+        return Vec::new();
+    }
+    groups
+        .into_iter()
+        .map(|(cluster, members)| {
+            let mut selected: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|index| metrics[*index].selected_for_consensus)
+                .collect();
+            if selected.is_empty() {
+                if let Some(best) = members.iter().copied().max_by(|a, b| {
+                    metrics[*a]
+                        .quality_score
+                        .total_cmp(&metrics[*b].quality_score)
+                }) {
+                    selected.push(best);
+                }
+            }
+            let cluster_id = format!("cluster-{}", cluster + 1);
+            let member_ids = members
+                .iter()
+                .map(|index| alignment.copies()[*index].id.clone())
+                .collect();
+            let selected_ids = selected
+                .iter()
+                .map(|index| alignment.copies()[*index].id.clone())
+                .collect();
+            let consensus =
+                refined_consensus(alignment, &selected, metrics, boundary.left, boundary.right);
+            let confidence_tier = if members.len() >= 5 && evidence.support_for_splitting >= 0.70 {
+                ConfidenceTier::High
+            } else {
+                ConfidenceTier::Moderate
+            };
+            SubfamilyConsensus {
+                cluster_id: cluster_id.clone(),
+                members: member_ids,
+                selected_members: selected_ids,
+                consensus,
+                split_support: evidence.support_for_splitting,
+                confidence_tier,
+                consensus_file: out
+                    .join("subfamilies")
+                    .join(format!("{cluster_id}.consensus.fa"))
+                    .display()
+                    .to_string(),
+                alignment_file: out
+                    .join("subfamilies")
+                    .join(format!("{cluster_id}.alignment.fa"))
+                    .display()
+                    .to_string(),
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1216,6 +1312,35 @@ pub enum ConfidenceTier {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceCalibration {
+    pub schema_version: String,
+    pub source: String,
+    pub bins: Vec<ConfidenceCalibrationBin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceCalibrationBin {
+    pub minimum_score: f64,
+    pub maximum_score: f64,
+    pub estimated_probability_correct: f64,
+    pub sample_size: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceAssessment {
+    pub tier: ConfidenceTier,
+    pub heuristic_score: f64,
+    pub factor_scores: BTreeMap<String, f64>,
+    pub jackknife_replicates: usize,
+    pub left_boundary_stability: Option<f64>,
+    pub right_boundary_stability: Option<f64>,
+    pub calibrated_probability: Option<f64>,
+    pub calibration_sample_size: Option<usize>,
+    pub calibration_source: Option<String>,
+    pub calibration_status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputFile {
     pub path: String,
     pub sha256: Option<String>,
@@ -1242,6 +1367,7 @@ pub struct CurationParameters {
     pub near_identity: f64,
     pub minimum_pairwise_overlap: usize,
     pub scan_selected_copies: bool,
+    pub split_subfamilies: bool,
     pub max_copy_domain_targets: usize,
     pub domain_rule_source: String,
     pub boundary: BoundaryConfig,
@@ -1256,6 +1382,16 @@ pub struct BoundaryOverride {
     #[serde(default)]
     pub notes: String,
     pub created_at: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostDomainAssessment {
+    pub assessment: String,
+    pub te_associated_hits: usize,
+    pub host_like_hits: usize,
+    pub unclassified_hits: usize,
+    pub host_domain_fraction_of_consensus: f64,
+    pub host_hits_on_selected_copies_only: Vec<String>,
+    pub evidence_score: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1275,11 +1411,14 @@ pub struct CurationResult {
     pub tsd_support_by_length: BTreeMap<usize, usize>,
     pub domain_evidence: Vec<DomainHit>,
     pub domain_rule_matches: Vec<DomainRuleMatch>,
+    pub host_domain_assessment: HostDomainAssessment,
     pub locus_diagnostics: Vec<LocusDiagnostic>,
     pub subfamily_evidence: SubfamilyEvidence,
+    pub subfamily_consensuses: Vec<SubfamilyConsensus>,
     pub architecture_hints: Vec<ArchitectureHint>,
     pub warnings: Vec<CurationWarning>,
     pub confidence_tier: ConfidenceTier,
+    pub confidence_assessment: ConfidenceAssessment,
     pub output_files: BTreeMap<String, String>,
     pub external_commands: Vec<String>,
     pub external_tool_versions: BTreeMap<String, String>,
@@ -1301,7 +1440,9 @@ pub struct CurateOptions {
     pub getorf: Option<PathBuf>,
     pub domain_rules: Option<PathBuf>,
     pub boundary_override: Option<PathBuf>,
+    pub confidence_calibration: Option<PathBuf>,
     pub scan_selected_copies: bool,
+    pub split_subfamilies: bool,
     pub max_copy_domain_targets: usize,
     pub min_copies: usize,
     pub force: bool,
@@ -1312,9 +1453,6 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
         return Err(CurationError::InvalidParameter(
             "--threads, --min-copies, and --max-copy-domain-targets must be positive".into(),
         ));
-    }
-    if options.getorf.is_some() {
-        return Err(CurationError::InvalidParameter("--getorf is reserved for a later ORF-target mode; omit it to use the built-in six-frame translation".into()));
     }
     prepare_output(&options.out, options.force)?;
     let alignment = Alignment::from_fasta(&options.alignment, options.min_copies)?;
@@ -1500,18 +1638,70 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
     let (domain_hints, domain_warnings, domain_rule_matches) =
         interpret_domains(&domains, &domain_rules);
     warnings.extend(domain_warnings);
+    let (host_domain_assessment, host_domain_warnings) = assess_host_domains(
+        &domains,
+        &domain_rules,
+        consensus.sequence.len(),
+        &structural,
+    );
+    warnings.extend(host_domain_warnings);
     let (locus_diagnostics, locus_warnings) =
         locus_and_flank_diagnostics(&metadata, &stats, &boundaries);
     warnings.extend(locus_warnings);
-    let tier = confidence_tier(
-        selected.len(),
-        &boundaries,
-        &subfamilies,
-        &stats,
-        &structural,
-        &domains,
-        &domain_hints,
-    );
+    let subfamily_consensuses = if options.split_subfamilies {
+        build_subfamily_consensuses(
+            &alignment,
+            &metrics,
+            &boundaries,
+            &subfamilies,
+            3,
+            &options.out,
+        )
+    } else {
+        Vec::new()
+    };
+    if options.split_subfamilies && subfamily_consensuses.is_empty() {
+        warnings.push(CurationWarning::new("subfamily_split_not_supported", "Subfamily splitting was requested but cluster separation, support, or minimum cluster size was insufficient", "warning"));
+    } else if !subfamily_consensuses.is_empty() {
+        warnings.push(CurationWarning::new("subfamily_consensuses_emitted", "Strongly supported candidate subfamily consensuses were emitted as additional review products", "info"));
+    }
+    let confidence_calibration =
+        load_confidence_calibration(options.confidence_calibration.as_deref())?;
+    let confidence_assessment = confidence_assessment(ConfidenceEvidence {
+        usable: selected.len(),
+        boundary: &boundaries,
+        subfamilies: &subfamilies,
+        stats: &stats,
+        structural: &structural,
+        domains: &domains,
+        domain_hints: &domain_hints,
+        alignment: &alignment,
+        config: &cfg,
+        calibration: confidence_calibration.as_ref(),
+    });
+    if confidence_assessment.jackknife_replicates >= 3 {
+        if confidence_assessment
+            .left_boundary_stability
+            .is_some_and(|stability| stability < 0.60)
+        {
+            warnings.push(CurationWarning::new(
+                "left_boundary_jackknife_unstable",
+                "The proposed left boundary was recovered in fewer than 60% of leave-one-copy-out replicates",
+                "warning",
+            ));
+        }
+        if confidence_assessment
+            .right_boundary_stability
+            .is_some_and(|stability| stability < 0.60)
+        {
+            warnings.push(CurationWarning::new(
+                "right_boundary_jackknife_unstable",
+                "The proposed right boundary was recovered in fewer than 60% of leave-one-copy-out replicates",
+                "warning",
+            ));
+        }
+    }
+    let tier = confidence_assessment.tier.clone();
     let mut outputs = BTreeMap::new();
     for name in [
         "curated.consensus.fa",
@@ -1526,6 +1716,16 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
         "report.html",
     ] {
         outputs.insert(name.into(), options.out.join(name).display().to_string());
+    }
+    for split in &subfamily_consensuses {
+        outputs.insert(
+            format!("subfamilies/{}.consensus.fa", split.cluster_id),
+            split.consensus_file.clone(),
+        );
+        outputs.insert(
+            format!("subfamilies/{}.alignment.fa", split.cluster_id),
+            split.alignment_file.clone(),
+        );
     }
     let mut inputs = BTreeMap::new();
     add_input(&mut inputs, "alignment", &options.alignment);
@@ -1543,6 +1743,9 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
     }
     if let Some(p) = &options.boundary_override {
         add_input(&mut inputs, "boundary_override", p)
+    }
+    if let Some(p) = &options.confidence_calibration {
+        add_input(&mut inputs, "confidence_calibration", p)
     }
     let mut hints: Vec<ArchitectureHint> =
         boundaries.architecture_hint.clone().into_iter().collect();
@@ -1570,6 +1773,7 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
             near_identity: 0.98,
             minimum_pairwise_overlap: 50.min(alignment.width()),
             scan_selected_copies: options.scan_selected_copies,
+            split_subfamilies: options.split_subfamilies,
             max_copy_domain_targets: options.max_copy_domain_targets,
             domain_rule_source,
             boundary: cfg,
@@ -1592,11 +1796,14 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
         tsd_support_by_length,
         domain_evidence: domains,
         domain_rule_matches,
+        host_domain_assessment,
         locus_diagnostics,
         subfamily_evidence: subfamilies,
+        subfamily_consensuses,
         architecture_hints: hints,
         warnings,
         confidence_tier: tier,
+        confidence_assessment,
         output_files: outputs,
         external_commands: commands,
         external_tool_versions: versions,
@@ -1909,6 +2116,67 @@ fn map_domain_coordinates(hit: &mut DomainHit, nucleotide_len: usize) {
     }
 }
 
+#[derive(Debug, Clone)]
+enum ProteinCoordinateMapping {
+    SixFrame {
+        nucleotide_len: usize,
+    },
+    Orf {
+        nucleotide_len: usize,
+        start_1based: usize,
+        end_1based: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ProteinQueryMetadata {
+    original_id: String,
+    source_type: String,
+    coordinates: ProteinCoordinateMapping,
+}
+
+fn map_orf_coordinates(
+    hit: &mut DomainHit,
+    nucleotide_len: usize,
+    start_1based: usize,
+    end_1based: usize,
+) {
+    if start_1based <= end_1based {
+        let origin = start_1based.saturating_sub(1);
+        hit.nucleotide_start = Some((origin + (hit.aa_start - 1) * 3).min(nucleotide_len));
+        hit.nucleotide_end = Some(
+            (origin + hit.aa_end * 3)
+                .min(end_1based)
+                .min(nucleotide_len),
+        );
+        hit.strand = Some("+".into());
+        hit.frame = Some(((origin % 3) + 1) as i8);
+    } else {
+        hit.nucleotide_start = Some(
+            start_1based
+                .saturating_sub(hit.aa_end * 3)
+                .max(end_1based.saturating_sub(1)),
+        );
+        hit.nucleotide_end = Some(
+            start_1based
+                .saturating_sub((hit.aa_start - 1) * 3)
+                .min(nucleotide_len),
+        );
+        hit.strand = Some("-".into());
+        hit.frame = Some(-(((nucleotide_len.saturating_sub(start_1based)) % 3 + 1) as i8));
+    }
+}
+
+fn parse_getorf_region(description: Option<&str>) -> Option<(usize, usize)> {
+    let region = description?.split('[').nth(1)?.split(']').next()?;
+    let coordinates: Vec<usize> = region
+        .split(|character: char| !character.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse().ok())
+        .collect();
+    (coordinates.len() >= 2).then(|| (coordinates[0], coordinates[1]))
+}
+
 fn build_domain_targets(
     options: &CurateOptions,
     alignment: &Alignment,
@@ -1939,6 +2207,144 @@ fn build_domain_targets(
     targets
 }
 
+type PreparedProteins = (
+    HashMap<String, ProteinQueryMetadata>,
+    Vec<String>,
+    BTreeMap<String, String>,
+);
+
+fn prepare_domain_proteins(
+    options: &CurateOptions,
+    targets: &[DomainNucleotideTarget],
+    protein_path: &Path,
+) -> Result<PreparedProteins, CurationError> {
+    let getorf = options
+        .getorf
+        .clone()
+        .or_else(|| env::var_os("REPUTILS_GETORF").map(PathBuf::from));
+    if let Some(executable) = getorf {
+        let nucleotide_path = options.out.join("domain-nucleotide-target.fa");
+        let mut nucleotide_file = create(&nucleotide_path)?;
+        for (index, target) in targets.iter().enumerate() {
+            writeln!(
+                nucleotide_file,
+                ">target{index}\n{}",
+                String::from_utf8_lossy(&target.sequence)
+            )
+            .map_err(|error| io_error(&nucleotide_path, error))?;
+        }
+        let command = format!(
+            "{} -sequence {} -outseq {} -find 1 -minsize 90",
+            executable.display(),
+            nucleotide_path.display(),
+            protein_path.display()
+        );
+        let status = Command::new(&executable)
+            .arg("-sequence")
+            .arg(&nucleotide_path)
+            .arg("-outseq")
+            .arg(protein_path)
+            .arg("-find")
+            .arg("1")
+            .arg("-minsize")
+            .arg("90")
+            .status()
+            .map_err(|error| {
+                CurationError::ExternalTool(format!(
+                    "could not execute {}: {error}",
+                    executable.display()
+                ))
+            })?;
+        if !status.success() {
+            return Err(CurationError::ExternalTool(format!(
+                "getorf exited with {status}"
+            )));
+        }
+        let reader = fasta::Reader::from_file(protein_path)
+            .map_err(|error| CurationError::Fasta(error.to_string()))?;
+        let mut metadata = HashMap::new();
+        for record in reader.records() {
+            let record = record.map_err(|error| CurationError::Fasta(error.to_string()))?;
+            let key = record
+                .id()
+                .rsplit_once('_')
+                .map_or(record.id(), |value| value.0);
+            let index = key
+                .strip_prefix("target")
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    CurationError::ExternalTool(format!(
+                        "getorf emitted unresolvable record ID {}",
+                        record.id()
+                    ))
+                })?;
+            let target = targets.get(index).ok_or_else(|| {
+                CurationError::ExternalTool(format!(
+                    "getorf emitted out-of-range target ID {}",
+                    record.id()
+                ))
+            })?;
+            let (start_1based, end_1based) =
+                parse_getorf_region(record.desc()).ok_or_else(|| {
+                    CurationError::ExternalTool(format!(
+                        "getorf record {} lacks a parseable [start - end] region",
+                        record.id()
+                    ))
+                })?;
+            metadata.insert(
+                record.id().to_string(),
+                ProteinQueryMetadata {
+                    original_id: target.id.clone(),
+                    source_type: target.source_type.clone(),
+                    coordinates: ProteinCoordinateMapping::Orf {
+                        nucleotide_len: target.sequence.len(),
+                        start_1based,
+                        end_1based,
+                    },
+                },
+            );
+        }
+        let mut versions = BTreeMap::new();
+        if let Ok(output) = Command::new(&executable).arg("-help").output() {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            versions.insert(
+                "getorf".into(),
+                combined
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            );
+        }
+        Ok((metadata, vec![command], versions))
+    } else {
+        let mut file = create(protein_path)?;
+        let mut metadata = HashMap::new();
+        for (index, target) in targets.iter().enumerate() {
+            let key = format!("target{index}");
+            for (id, protein) in six_frame_translations(&key, &target.sequence) {
+                metadata.insert(
+                    id.clone(),
+                    ProteinQueryMetadata {
+                        original_id: target.id.clone(),
+                        source_type: target.source_type.clone(),
+                        coordinates: ProteinCoordinateMapping::SixFrame {
+                            nucleotide_len: target.sequence.len(),
+                        },
+                    },
+                );
+                writeln!(file, ">{}\n{}", id, String::from_utf8_lossy(&protein))
+                    .map_err(|error| io_error(protein_path, error))?;
+            }
+        }
+        Ok((metadata, Vec::new(), BTreeMap::new()))
+    }
+}
+
 type DomainRun = (Vec<DomainHit>, Vec<String>, BTreeMap<String, String>);
 
 fn run_domains(
@@ -1964,22 +2370,10 @@ fn run_domains(
         (PathBuf::from("hmmscan"), "hmmscan")
     };
     let target = options.out.join("domain-target.fa");
-    let mut f = File::create(&target).map_err(|e| io_error(&target, e))?;
-    let mut target_metadata = HashMap::new();
-    for (index, nucleotide) in targets.iter().enumerate() {
-        let key = format!("target{index}");
-        for (id, protein) in six_frame_translations(&key, &nucleotide.sequence) {
-            target_metadata.insert(
-                id.clone(),
-                (
-                    nucleotide.id.clone(),
-                    nucleotide.source_type.clone(),
-                    nucleotide.sequence.len(),
-                ),
-            );
-            writeln!(f, ">{}\n{}", id, String::from_utf8_lossy(&protein))
-                .map_err(|e| io_error(&target, e))?;
-        }
+    let (target_metadata, mut commands, mut versions) =
+        prepare_domain_proteins(options, targets, &target)?;
+    if target_metadata.is_empty() {
+        return Ok((Vec::new(), commands, versions));
     }
     let dom = options.out.join("domains.domtblout");
     let command = format!(
@@ -2008,15 +2402,21 @@ fn run_domains(
     }
     let mut hits = parse_domtblout(&dom, "unknown")?;
     for hit in &mut hits {
-        if let Some((original_id, source_type, nucleotide_len)) =
-            target_metadata.get(&hit.sequence_id)
-        {
-            map_domain_coordinates(hit, *nucleotide_len);
-            hit.sequence_id.clone_from(original_id);
-            hit.source_type.clone_from(source_type);
+        if let Some(metadata) = target_metadata.get(&hit.sequence_id) {
+            match metadata.coordinates {
+                ProteinCoordinateMapping::SixFrame { nucleotide_len } => {
+                    map_domain_coordinates(hit, nucleotide_len)
+                }
+                ProteinCoordinateMapping::Orf {
+                    nucleotide_len,
+                    start_1based,
+                    end_1based,
+                } => map_orf_coordinates(hit, nucleotide_len, start_1based, end_1based),
+            }
+            hit.sequence_id.clone_from(&metadata.original_id);
+            hit.source_type.clone_from(&metadata.source_type);
         }
     }
-    let mut versions = BTreeMap::new();
     if let Ok(o) = Command::new(&exe).arg("-h").output() {
         let v = String::from_utf8_lossy(&o.stdout)
             .lines()
@@ -2025,7 +2425,8 @@ fn run_domains(
             .to_string();
         versions.insert(tool_name.into(), v);
     }
-    Ok((hits, vec![command], versions))
+    commands.push(command);
+    Ok((hits, commands, versions))
 }
 
 fn load_domain_rules(path: Option<&Path>) -> Result<(DomainRuleSet, String), CurationError> {
@@ -2184,6 +2585,123 @@ fn interpret_domains(
 ///
 /// `total = alignment score + 0.12 terminal support + 0.08 TSD support
 ///        + 0.10 domain containment - 0.20 domain cut - 0.10 conserved-edge penalty`.
+fn assess_host_domains(
+    hits: &[DomainHit],
+    rules: &DomainRuleSet,
+    consensus_length: usize,
+    structural: &[StructuralEvidence],
+) -> (HostDomainAssessment, Vec<CurationWarning>) {
+    let mut te_hits = 0usize;
+    let mut host_hits = 0usize;
+    let mut unclassified = 0usize;
+    let mut host_intervals = Vec::new();
+    let mut selected_host_ids = HashSet::new();
+    let mut consensus_host = false;
+    for hit in hits {
+        let text = format!("{} {} {}", hit.domain_name, hit.accession, hit.description)
+            .to_ascii_lowercase();
+        let matched: Vec<_> = rules
+            .rules
+            .iter()
+            .filter(|rule| {
+                rule.patterns
+                    .iter()
+                    .any(|pattern| text.contains(&pattern.to_ascii_lowercase()))
+            })
+            .collect();
+        let te = matched.iter().any(|rule| rule.te_associated);
+        let host = matched.iter().any(|rule| !rule.te_associated);
+        if te {
+            te_hits += 1;
+        }
+        if host {
+            host_hits += 1;
+            if hit.source_type == "refined_consensus" {
+                consensus_host = true;
+                if let (Some(start), Some(end)) = (hit.nucleotide_start, hit.nucleotide_end) {
+                    host_intervals.push((start, end));
+                }
+            } else if hit.source_type == "selected_copy" {
+                selected_host_ids.insert(hit.sequence_id.clone());
+            }
+        }
+        if !te && !host {
+            unclassified += 1;
+        }
+    }
+    host_intervals.sort_unstable();
+    let mut covered = 0usize;
+    let mut current: Option<(usize, usize)> = None;
+    for (start, end) in host_intervals {
+        current = match current {
+            Some((old_start, old_end)) if start <= old_end => Some((old_start, old_end.max(end))),
+            Some((old_start, old_end)) => {
+                covered += old_end.saturating_sub(old_start);
+                Some((start, end))
+            }
+            None => Some((start, end)),
+        };
+    }
+    if let Some((start, end)) = current {
+        covered += end.saturating_sub(start);
+    }
+    let host_fraction = covered as f64 / consensus_length.max(1) as f64;
+    let strong_structure = structural
+        .first()
+        .is_some_and(|hit| hit.identity >= 0.80 && hit.candidate_length >= 8);
+    let hit_fraction = host_hits as f64 / hits.len().max(1) as f64;
+    let evidence_score = (0.50 * host_fraction
+        + 0.30 * hit_fraction
+        + if te_hits == 0 && host_hits > 0 {
+            0.20
+        } else {
+            0.0
+        })
+    .clamp(0.0, 1.0);
+    let assessment = if host_hits == 0 {
+        "no_host_domain_signal"
+    } else if te_hits > 0 {
+        "mixed_te_and_host_domains"
+    } else if host_fraction >= 0.50 && !strong_structure {
+        "strong_host_like_domain_signal"
+    } else {
+        "review_host_like_domain_signal"
+    };
+    let mut warnings = Vec::new();
+    if assessment == "strong_host_like_domain_signal" {
+        warnings.push(CurationWarning::new("possible_host_gene", "Host-associated domains cover much of the refined consensus without coherent TE domain or terminal support", "warning"));
+    }
+    if assessment == "mixed_te_and_host_domains" {
+        warnings.push(CurationWarning::new(
+            "possible_chimeric_consensus",
+            "TE-associated and configured host-associated domains coexist in the refined family",
+            "warning",
+        ));
+        warnings.push(CurationWarning::new(
+            "possible_nested_element",
+            "Mixed domain classes may reflect a nested insertion rather than one architecture",
+            "warning",
+        ));
+    }
+    if !selected_host_ids.is_empty() && !consensus_host {
+        warnings.push(CurationWarning::new("host_domain_copy_specific", "Host-associated domains occur only in selected genomic copies and may be locus-specific contamination or nesting", "warning"));
+    }
+    let mut selected_only: Vec<_> = selected_host_ids.into_iter().collect();
+    selected_only.sort();
+    (
+        HostDomainAssessment {
+            assessment: assessment.into(),
+            te_associated_hits: te_hits,
+            host_like_hits: host_hits,
+            unclassified_hits: unclassified,
+            host_domain_fraction_of_consensus: host_fraction,
+            host_hits_on_selected_copies_only: selected_only,
+            evidence_score,
+        },
+        warnings,
+    )
+}
+
 /// Domain coordinates are mapped back to alignment space using `domain_reference_left`.
 #[derive(Clone, Copy)]
 struct JointBoundaryEvidence<'a> {
@@ -2477,7 +2995,7 @@ fn locus_and_flank_diagnostics(
     (diagnostics, warnings)
 }
 
-fn confidence_tier(
+fn confidence_factors(
     usable: usize,
     boundary: &BoundaryResult,
     subfamilies: &SubfamilyEvidence,
@@ -2485,10 +3003,7 @@ fn confidence_tier(
     structural: &[StructuralEvidence],
     domains: &[DomainHit],
     domain_hints: &[ArchitectureHint],
-) -> ConfidenceTier {
-    if usable < 2 {
-        return ConfidenceTier::Insufficient;
-    }
+) -> (f64, BTreeMap<String, f64>) {
     let missing = stats.iter().map(|column| column.gap_fraction).sum::<f64>() / stats.len() as f64;
     let structural_coherence = structural.first().map_or(0.4, |hit| {
         hit.identity * (hit.candidate_length as f64 / 20.0).min(1.0)
@@ -2509,14 +3024,32 @@ fn confidence_tier(
     } else {
         0.85
     };
-    let boundary_agreement = (boundary.left_confidence + boundary.right_confidence) / 2.0;
-    let score = (usable.min(6) as f64 / 6.0) * 0.25
-        + boundary_agreement * 0.25
-        + (1.0 - subfamilies.support_for_splitting) * 0.15
-        + (1.0 - missing) * 0.15
-        + structural_coherence * 0.10
-        + domain_coherence * 0.10;
-    if score >= 0.72 {
+    let mut factors = BTreeMap::new();
+    factors.insert("usable_copy_support".into(), usable.min(6) as f64 / 6.0);
+    factors.insert(
+        "boundary_agreement".into(),
+        (boundary.left_confidence + boundary.right_confidence) / 2.0,
+    );
+    factors.insert(
+        "subfamily_coherence".into(),
+        1.0 - subfamilies.support_for_splitting,
+    );
+    factors.insert("called_data_completeness".into(), 1.0 - missing);
+    factors.insert("structural_coherence".into(), structural_coherence);
+    factors.insert("domain_coherence".into(), domain_coherence);
+    let score = factors["usable_copy_support"] * 0.25
+        + factors["boundary_agreement"] * 0.25
+        + factors["subfamily_coherence"] * 0.15
+        + factors["called_data_completeness"] * 0.15
+        + factors["structural_coherence"] * 0.10
+        + factors["domain_coherence"] * 0.10;
+    (score.clamp(0.0, 1.0), factors)
+}
+
+fn tier_for_score(score: f64, usable: usize) -> ConfidenceTier {
+    if usable < 2 {
+        ConfidenceTier::Insufficient
+    } else if score >= 0.72 {
         ConfidenceTier::High
     } else if score >= 0.50 {
         ConfidenceTier::Moderate
@@ -2524,9 +3057,202 @@ fn confidence_tier(
         ConfidenceTier::Low
     }
 }
+
+fn boundary_jackknife_stability(
+    alignment: &Alignment,
+    config: &BoundaryConfig,
+    final_boundary: &BoundaryResult,
+) -> (usize, Option<f64>, Option<f64>) {
+    if alignment.len() <= 2 {
+        return (0, None, None);
+    }
+    let step = (alignment.len() / 20).max(1);
+    let indices: Vec<_> = (0..alignment.len()).step_by(step).take(20).collect();
+    let tolerance = config.smoothing_window.saturating_mul(2).max(2);
+    let mut left_stable = 0usize;
+    let mut right_stable = 0usize;
+    let mut completed = 0usize;
+    for omitted in indices {
+        let records: Vec<_> = alignment
+            .copies()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != omitted)
+            .map(|(_, copy)| copy.clone())
+            .collect();
+        let Ok(sample) = Alignment::from_records(records, 2) else {
+            continue;
+        };
+        let sample_stats = column_statistics(&sample);
+        let mut sample_config = config.clone();
+        sample_config.minimum_copies = sample_config.minimum_copies.min(sample.len());
+        if let Ok(result) = infer_boundaries(&sample_stats, &sample_config, sample.len()) {
+            completed += 1;
+            if result.left.abs_diff(final_boundary.left) <= tolerance {
+                left_stable += 1;
+            }
+            if result.right.abs_diff(final_boundary.right) <= tolerance {
+                right_stable += 1;
+            }
+        }
+    }
+    if completed == 0 {
+        (0, None, None)
+    } else {
+        (
+            completed,
+            Some(left_stable as f64 / completed as f64),
+            Some(right_stable as f64 / completed as f64),
+        )
+    }
+}
+
+fn load_confidence_calibration(
+    path: Option<&Path>,
+) -> Result<Option<ConfidenceCalibration>, CurationError> {
+    let Some(path) = path else { return Ok(None) };
+    let file = File::open(path).map_err(|error| io_error(path, error))?;
+    let mut calibration: ConfidenceCalibration = serde_json::from_reader(file)?;
+    if calibration.schema_version != "reputils.confidence-calibration.v1"
+        || calibration.source.trim().is_empty()
+        || calibration.bins.is_empty()
+    {
+        return Err(CurationError::InvalidParameter(
+            "confidence calibration needs the supported schema, source, and at least one bin"
+                .into(),
+        ));
+    }
+    calibration
+        .bins
+        .sort_by(|a, b| a.minimum_score.total_cmp(&b.minimum_score));
+    let mut previous_end = 0.0;
+    for bin in &calibration.bins {
+        if !bin.minimum_score.is_finite()
+            || !bin.maximum_score.is_finite()
+            || bin.minimum_score < 0.0
+            || bin.maximum_score > 1.0
+            || bin.minimum_score >= bin.maximum_score
+            || !(0.0..=1.0).contains(&bin.estimated_probability_correct)
+            || bin.sample_size == 0
+            || bin.minimum_score < previous_end
+        {
+            return Err(CurationError::InvalidParameter(
+                "confidence calibration bins are invalid or overlapping".into(),
+            ));
+        }
+        previous_end = bin.maximum_score;
+    }
+    Ok(Some(calibration))
+}
+
+struct ConfidenceEvidence<'a> {
+    usable: usize,
+    boundary: &'a BoundaryResult,
+    subfamilies: &'a SubfamilyEvidence,
+    stats: &'a [AlignmentColumnStats],
+    structural: &'a [StructuralEvidence],
+    domains: &'a [DomainHit],
+    domain_hints: &'a [ArchitectureHint],
+    alignment: &'a Alignment,
+    config: &'a BoundaryConfig,
+    calibration: Option<&'a ConfidenceCalibration>,
+}
+
+fn confidence_assessment(evidence: ConfidenceEvidence<'_>) -> ConfidenceAssessment {
+    let ConfidenceEvidence {
+        usable,
+        boundary,
+        subfamilies,
+        stats,
+        structural,
+        domains,
+        domain_hints,
+        alignment,
+        config,
+        calibration,
+    } = evidence;
+    let (score, factors) = confidence_factors(
+        usable,
+        boundary,
+        subfamilies,
+        stats,
+        structural,
+        domains,
+        domain_hints,
+    );
+    let (replicates, left_stability, right_stability) =
+        boundary_jackknife_stability(alignment, config, boundary);
+    let matched_bin = calibration.and_then(|table| {
+        table.bins.iter().find(|bin| {
+            score >= bin.minimum_score
+                && (score < bin.maximum_score || (bin.maximum_score == 1.0 && score <= 1.0))
+        })
+    });
+    let calibrated_probability = matched_bin.map(|bin| bin.estimated_probability_correct);
+    let tier_score = calibrated_probability.unwrap_or(score);
+    ConfidenceAssessment {
+        tier: tier_for_score(tier_score, usable),
+        heuristic_score: score,
+        factor_scores: factors,
+        jackknife_replicates: replicates,
+        left_boundary_stability: left_stability,
+        right_boundary_stability: right_stability,
+        calibrated_probability,
+        calibration_sample_size: matched_bin.map(|bin| bin.sample_size),
+        calibration_source: calibration.map(|table| table.source.clone()),
+        calibration_status: if calibration.is_none() {
+            "heuristic-with-internal-jackknife; not statistically calibrated".into()
+        } else if matched_bin.is_some() {
+            "externally-calibrated-from-labeled-bin".into()
+        } else {
+            "calibration-table-supplied-but-no-bin-matched".into()
+        },
+    }
+}
 fn create(path: &Path) -> Result<File, CurationError> {
     File::create(path).map_err(|e| io_error(path, e))
 }
+fn write_subfamily_outputs(
+    out: &Path,
+    alignment: &Alignment,
+    result: &CurationResult,
+) -> Result<(), CurationError> {
+    if result.subfamily_consensuses.is_empty() {
+        return Ok(());
+    }
+    let directory = out.join("subfamilies");
+    fs::create_dir_all(&directory).map_err(|error| io_error(&directory, error))?;
+    for split in &result.subfamily_consensuses {
+        let consensus_path = Path::new(&split.consensus_file);
+        let mut consensus_file = create(consensus_path)?;
+        writeln!(
+            consensus_file,
+            ">{} confidence={:?} split_support={:.4}\n{}",
+            split.cluster_id, split.confidence_tier, split.split_support, split.consensus.sequence
+        )
+        .map_err(|error| io_error(consensus_path, error))?;
+        let member_set: HashSet<_> = split.members.iter().map(String::as_str).collect();
+        let alignment_path = Path::new(&split.alignment_file);
+        let mut alignment_file = create(alignment_path)?;
+        for copy in alignment
+            .copies()
+            .iter()
+            .filter(|copy| member_set.contains(copy.id.as_str()))
+        {
+            writeln!(
+                alignment_file,
+                ">{}\n{}",
+                copy.id,
+                String::from_utf8_lossy(
+                    &copy.sequence[result.boundary_result.left..result.boundary_result.right]
+                )
+            )
+            .map_err(|error| io_error(alignment_path, error))?;
+        }
+    }
+    Ok(())
+}
+
 fn write_outputs(
     out: &Path,
     alignment: &Alignment,
@@ -2546,6 +3272,7 @@ fn write_outputs(
         writeln!(f, ">{}\n{}", c.id, String::from_utf8_lossy(&c.sequence))
             .map_err(|e| io_error(&out.join("curated.alignment.fa"), e))?
     }
+    write_subfamily_outputs(out, alignment, r)?;
     write_boundaries(&out.join("boundaries.tsv"), &r.boundary_result)?;
     write_copies(&out.join("copies.tsv"), &r.copy_metrics)?;
     write_columns(&out.join("columns.tsv"), stats)?;
@@ -2736,7 +3463,7 @@ fn render_report(r: &CurationResult, a: &Alignment, stats: &[AlignmentColumnStat
         })
         .collect::<String>();
     format!(
-        r#"<!doctype html><html><head><meta charset="utf-8"><title>reputils curation report</title><style>body{{font:14px system-ui;max-width:1200px;margin:auto;padding:2rem}}code{{overflow-wrap:anywhere}}table{{border-collapse:collapse}}td,th{{border:1px solid #bbb;padding:.3rem}}.track{{height:130px;width:100%;border:1px solid #bbb}}.boundary{{background:#fff3cd;padding:1rem}}.alignment{{overflow:auto;white-space:nowrap;font-family:monospace}}.muted{{color:#555}}</style></head><body><h1>TE family curation report</h1><p class="muted">Semi-automatic proposal; boundaries and architecture require curator review.</p><section class="boundary"><h2>Assessment: {:?}</h2><p>Proposed alignment interval: <b>{}–{}</b> (1-based inclusive); confidence left {:.2}, right {:.2}; architecture hint {:?}.</p><details><summary>Alternative boundary hypotheses</summary><pre>{}</pre></details></section><h2>Input summary</h2><p>{} copies × {} columns; {} selected representatives.</p><h2>Consensus</h2><code>{}</code><h2>Evidence tracks</h2><canvas id="tracks" class="track"></canvas><p>Blue occupancy; green called-base identity; orange normalized entropy. Raw start/end and gap-transition counts are embedded below.</p><details><summary>Track data</summary><pre id="track-data">[{}]</pre></details><h2>Copies</h2><table><tr><th>ID</th><th>covered</th><th>quality</th><th>selected</th><th>reason</th></tr>{}</table><h2>Alignment around proposed boundaries</h2><div class="alignment">{}</div><h2>Terminal evidence</h2><pre>{}</pre><h2>Protein domains</h2><pre>{}</pre><h2>Subfamily analysis</h2><pre>{}</pre><h2>Locus and host-flank diagnostics</h2><pre>{}</pre><h2>Warnings and limitations</h2><ul>{}</ul><h2>Curator override</h2><p>Edit the one-based inclusive boundaries and download a small override record. This does not silently rewrite the curation outputs.</p><label>Left <input id="override-left" type="number" min="1"></label> <label>Right <input id="override-right" type="number" min="1"></label><br><label>Notes<br><textarea id="override-notes" rows="4" cols="80"></textarea></label><br><button type="button" onclick="downloadOverride()">Download boundary override JSON</button><p id="override-status" class="muted"></p><h2>Parameters and provenance</h2><pre>{}</pre><script>const d={};const c=document.getElementById('tracks'),x=c.getContext('2d');c.width=c.clientWidth*devicePixelRatio;c.height=130*devicePixelRatio;function line(k,color,scale=1){{x.strokeStyle=color;x.beginPath();d.forEach((q,i)=>{{let xx=i/(d.length-1||1)*c.width,yy=c.height-q[k]/scale*c.height;(i?x.lineTo(xx,yy):x.moveTo(xx,yy))}});x.stroke()}}line('o','#1769aa');line('i','#2e7d32');line('e','#ef6c00',2);const boundaryText=document.querySelector('.boundary p').textContent;const boundaryMatch=boundaryText.match(/interval:\s*(\d+).*(\d+)\s*\(/);if(boundaryMatch){{document.getElementById('override-left').value=boundaryMatch[1];document.getElementById('override-right').value=boundaryMatch[2];}}function downloadOverride(){{const left=Number(document.getElementById('override-left').value),right=Number(document.getElementById('override-right').value),status=document.getElementById('override-status');if(!Number.isInteger(left)||!Number.isInteger(right)||left<1||right<left){{status.textContent='Invalid boundaries: require 1 <= left <= right.';return;}}const payload={{schema_version:'reputils.curation-override.v1',source_schema_version:'reputils.curation.v1',left_1based:left,right_1based_inclusive:right,notes:document.getElementById('override-notes').value,created_at:new Date().toISOString()}};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{{type:'application/json'}}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='boundary-override.json';link.click();URL.revokeObjectURL(url);status.textContent='Override downloaded; apply it explicitly in a later curation step.';}}</script></body></html>"#,
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>reputils curation report</title><style>body{{font:14px system-ui;max-width:1200px;margin:auto;padding:2rem}}code{{overflow-wrap:anywhere}}table{{border-collapse:collapse}}td,th{{border:1px solid #bbb;padding:.3rem}}.track{{height:130px;width:100%;border:1px solid #bbb}}.boundary{{background:#fff3cd;padding:1rem}}.alignment{{overflow:auto;white-space:nowrap;font-family:monospace}}.muted{{color:#555}}</style></head><body><h1>TE family curation report</h1><p class="muted">Semi-automatic proposal; boundaries and architecture require curator review.</p><section class="boundary"><h2>Assessment: {:?}</h2><p>Proposed alignment interval: <b>{}–{}</b> (1-based inclusive); confidence left {:.2}, right {:.2}; architecture hint {:?}.</p><details><summary>Alternative boundary hypotheses</summary><pre>{}</pre></details></section><h2>Confidence evidence</h2><pre>{}</pre><h2>Input summary</h2><p>{} copies × {} columns; {} selected representatives.</p><h2>Consensus</h2><code>{}</code><h2>Evidence tracks</h2><canvas id="tracks" class="track"></canvas><p>Blue occupancy; green called-base identity; orange normalized entropy. Raw start/end and gap-transition counts are embedded below.</p><details><summary>Track data</summary><pre id="track-data">[{}]</pre></details><h2>Copies</h2><table><tr><th>ID</th><th>covered</th><th>quality</th><th>selected</th><th>reason</th></tr>{}</table><h2>Alignment around proposed boundaries</h2><div class="alignment">{}</div><h2>Terminal evidence</h2><pre>{}</pre><h2>Protein domains</h2><pre>{}</pre><h2>Subfamily analysis</h2><pre>{}</pre><h2>Locus and host-flank diagnostics</h2><pre>{}</pre><h2>Warnings and limitations</h2><ul>{}</ul><h2>Curator override</h2><p>Edit the one-based inclusive boundaries and download a small override record. This does not silently rewrite the curation outputs.</p><label>Left <input id="override-left" type="number" min="1"></label> <label>Right <input id="override-right" type="number" min="1"></label><br><label>Notes<br><textarea id="override-notes" rows="4" cols="80"></textarea></label><br><button type="button" onclick="downloadOverride()">Download boundary override JSON</button><p id="override-status" class="muted"></p><h2>Parameters and provenance</h2><pre>{}</pre><script>const d={};const c=document.getElementById('tracks'),x=c.getContext('2d');c.width=c.clientWidth*devicePixelRatio;c.height=130*devicePixelRatio;function line(k,color,scale=1){{x.strokeStyle=color;x.beginPath();d.forEach((q,i)=>{{let xx=i/(d.length-1||1)*c.width,yy=c.height-q[k]/scale*c.height;(i?x.lineTo(xx,yy):x.moveTo(xx,yy))}});x.stroke()}}line('o','#1769aa');line('i','#2e7d32');line('e','#ef6c00',2);const boundaryText=document.querySelector('.boundary p').textContent;const boundaryMatch=boundaryText.match(/interval:\s*(\d+).*(\d+)\s*\(/);if(boundaryMatch){{document.getElementById('override-left').value=boundaryMatch[1];document.getElementById('override-right').value=boundaryMatch[2];}}function downloadOverride(){{const left=Number(document.getElementById('override-left').value),right=Number(document.getElementById('override-right').value),status=document.getElementById('override-status');if(!Number.isInteger(left)||!Number.isInteger(right)||left<1||right<left){{status.textContent='Invalid boundaries: require 1 <= left <= right.';return;}}const payload={{schema_version:'reputils.curation-override.v1',source_schema_version:'reputils.curation.v1',left_1based:left,right_1based_inclusive:right,notes:document.getElementById('override-notes').value,created_at:new Date().toISOString()}};const blob=new Blob([JSON.stringify(payload,null,2)+'\n'],{{type:'application/json'}}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='boundary-override.json';link.click();URL.revokeObjectURL(url);status.textContent='Override downloaded; apply it explicitly in a later curation step.';}}</script></body></html>"#,
         r.confidence_tier,
         r.boundary_result.left + 1,
         r.boundary_result.right,
@@ -2744,6 +3471,7 @@ fn render_report(r: &CurationResult, a: &Alignment, stats: &[AlignmentColumnStat
         r.boundary_result.right_confidence,
         r.boundary_result.architecture_hint,
         esc(&serde_json::to_string_pretty(&r.boundary_result.alternatives).unwrap_or_default()),
+        esc(&serde_json::to_string_pretty(&r.confidence_assessment).unwrap_or_default()),
         r.alignment_summary.copies,
         r.alignment_summary.columns,
         r.alignment_summary.usable_copies,
@@ -2752,8 +3480,8 @@ fn render_report(r: &CurationResult, a: &Alignment, stats: &[AlignmentColumnStat
         copies,
         alignment,
         esc(&serde_json::to_string_pretty(&serde_json::json!({"terminal_repeats": r.structural_evidence, "coordinate_tsds": r.tsd_evidence, "tsd_support_by_length": r.tsd_support_by_length})).unwrap_or_default()),
-        esc(&serde_json::to_string_pretty(&serde_json::json!({"hits": r.domain_evidence, "matched_rules": r.domain_rule_matches})).unwrap_or_default()),
-        esc(&serde_json::to_string_pretty(&r.subfamily_evidence).unwrap_or_default()),
+        esc(&serde_json::to_string_pretty(&serde_json::json!({"hits": r.domain_evidence, "matched_rules": r.domain_rule_matches, "host_assessment": r.host_domain_assessment})).unwrap_or_default()),
+        esc(&serde_json::to_string_pretty(&serde_json::json!({"evidence": r.subfamily_evidence, "emitted_consensuses": r.subfamily_consensuses})).unwrap_or_default()),
         esc(&serde_json::to_string_pretty(&r.locus_diagnostics).unwrap_or_default()),
         warnings,
         esc(&serde_json::to_string_pretty(&r.parameters).unwrap_or_default()),
@@ -3064,6 +3792,7 @@ printf 'RT PF00001.1 100 target0|strand=+|frame=1 - 3 1e-20 50.0 0.0 1 1 1e-10 1
         let mut mode = fs::metadata(&exe).unwrap().permissions();
         mode.set_mode(0o755);
         fs::set_permissions(&exe, mode).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
         let db = dir.join("db.hmm");
         fs::write(&db, "").unwrap();
         let options = CurateOptions {
@@ -3081,7 +3810,9 @@ printf 'RT PF00001.1 100 target0|strand=+|frame=1 - 3 1e-20 50.0 0.0 1 1 1e-10 1
             getorf: None,
             domain_rules: None,
             boundary_override: None,
+            confidence_calibration: None,
             scan_selected_copies: false,
+            split_subfamilies: false,
             max_copy_domain_targets: 10,
             min_copies: 1,
             force: true,
@@ -3188,7 +3919,9 @@ printf 'RT PF00001.1 100 target0|strand=+|frame=1 - 3 1e-20 50.0 0.0 1 1 1e-10 1
             getorf: None,
             domain_rules: None,
             boundary_override: None,
+            confidence_calibration: None,
             scan_selected_copies: true,
+            split_subfamilies: false,
             max_copy_domain_targets: 2,
             min_copies: 1,
             force: false,
@@ -3307,5 +4040,268 @@ printf 'RT PF00001.1 100 target0|strand=+|frame=1 - 3 1e-20 50.0 0.0 1 1 1e-10 1
         assert_eq!((value.left_1based, value.right_1based_inclusive), (2, 7));
         assert!(read_boundary_override(&path, 6).is_err());
         let _ = fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mocked_getorf_targets_and_coordinates() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("reputils-getorf-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("mock-getorf");
+        fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ "$1" = "-help" ]; then echo 'getorf mock 1.0'; exit 0; fi
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-outseq" ]; then out=$2; shift 2; else shift; fi
+done
+printf '>target0_1 [1 - 9]\nMK\n>target0_2 [9 - 1]\nMK\n' > "$out"
+"#,
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let options = CurateOptions {
+            alignment: PathBuf::new(),
+            out: dir.clone(),
+            manifest: None,
+            query: None,
+            genome: None,
+            coordinates: None,
+            hmm_db: None,
+            repeatpeps: None,
+            threads: 1,
+            hmmscan: None,
+            hmmsearch: None,
+            getorf: Some(executable),
+            domain_rules: None,
+            boundary_override: None,
+            confidence_calibration: None,
+            scan_selected_copies: false,
+            split_subfamilies: false,
+            max_copy_domain_targets: 10,
+            min_copies: 1,
+            force: true,
+        };
+        let protein_path = dir.join("proteins.fa");
+        let targets = [DomainNucleotideTarget {
+            id: "consensus".into(),
+            source_type: "refined_consensus".into(),
+            sequence: b"ATGAAATAG".to_vec(),
+        }];
+        let (metadata, commands, versions) =
+            prepare_domain_proteins(&options, &targets, &protein_path).unwrap();
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(commands.len(), 1);
+        assert!(versions.contains_key("getorf"));
+        let mut plus = DomainHit {
+            sequence_id: "target0_1".into(),
+            source_type: "unknown".into(),
+            domain_name: "x".into(),
+            accession: "x".into(),
+            description: String::new(),
+            evalue: 0.0,
+            conditional_evalue: 0.0,
+            bitscore: 0.0,
+            bias: 0.0,
+            aa_start: 1,
+            aa_end: 2,
+            nucleotide_start: None,
+            nucleotide_end: None,
+            strand: None,
+            frame: None,
+            coverage: 1.0,
+            partial: false,
+        };
+        map_orf_coordinates(&mut plus, 9, 1, 9);
+        assert_eq!(
+            (
+                plus.nucleotide_start,
+                plus.nucleotide_end,
+                plus.strand.as_deref()
+            ),
+            (Some(0), Some(6), Some("+"))
+        );
+        let mut minus = plus.clone();
+        map_orf_coordinates(&mut minus, 9, 9, 1);
+        assert_eq!(
+            (
+                minus.nucleotide_start,
+                minus.nucleotide_end,
+                minus.strand.as_deref()
+            ),
+            (Some(3), Some(9), Some("-"))
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn strong_subfamilies_emit_additional_consensuses() {
+        let alignment = ali(&[
+            ("a1", "AAAAAAAA"),
+            ("a2", "AAAAAAAT"),
+            ("a3", "AAAAAATA"),
+            ("c1", "CCCCCCCC"),
+            ("c2", "CCCCCCCT"),
+            ("c3", "CCCCCTCC"),
+        ]);
+        let evidence = subfamily_analysis(&alignment, 8);
+        let mut metrics = copy_metrics(&alignment, None, &HashMap::new());
+        for metric in &mut metrics {
+            metric.quality_score = 1.0;
+            metric.selected_for_consensus = true;
+        }
+        let boundary = BoundaryResult {
+            left: 0,
+            right: 8,
+            left_confidence: 1.0,
+            right_confidence: 1.0,
+            architecture_hint: None,
+            alternatives: Vec::new(),
+            winning_score: empty_components(1.0),
+            warnings: Vec::new(),
+        };
+        let splits = build_subfamily_consensuses(
+            &alignment,
+            &metrics,
+            &boundary,
+            &evidence,
+            3,
+            Path::new("out"),
+        );
+        assert_eq!(splits.len(), 2);
+        assert!(splits.iter().all(|split| split.members.len() == 3));
+    }
+
+    #[test]
+    fn full_run_writes_supported_subfamily_outputs_and_provenance() {
+        let root =
+            std::env::temp_dir().join(format!("reputils-split-output-{}", std::process::id()));
+        let alignment_path = root.with_extension("fa");
+        fs::write(
+            &alignment_path,
+            ">a1\nAAAAAAAA\n>a2\nAAAAAAAT\n>a3\nAAAAAATA\n>c1\nCCCCCCCC\n>c2\nCCCCCCCT\n>c3\nCCCCCTCC\n",
+        )
+        .unwrap();
+        let options = CurateOptions {
+            alignment: alignment_path.clone(),
+            out: root.clone(),
+            manifest: None,
+            query: None,
+            genome: None,
+            coordinates: None,
+            hmm_db: None,
+            repeatpeps: None,
+            threads: 1,
+            hmmscan: None,
+            hmmsearch: None,
+            getorf: None,
+            domain_rules: None,
+            boundary_override: None,
+            confidence_calibration: None,
+            scan_selected_copies: false,
+            split_subfamilies: true,
+            max_copy_domain_targets: 10,
+            min_copies: 3,
+            force: false,
+        };
+        let result = run(&options).unwrap();
+        assert_eq!(result.subfamily_consensuses.len(), 2);
+        for split in &result.subfamily_consensuses {
+            assert!(Path::new(&split.consensus_file).is_file());
+            assert!(Path::new(&split.alignment_file).is_file());
+            assert!(result
+                .output_files
+                .contains_key(&format!("subfamilies/{}.consensus.fa", split.cluster_id)));
+            assert!(result
+                .output_files
+                .contains_key(&format!("subfamilies/{}.alignment.fa", split.cluster_id)));
+        }
+        let serialized: serde_json::Value =
+            serde_json::from_reader(File::open(root.join("result.json")).unwrap()).unwrap();
+        assert_eq!(
+            serialized["subfamily_consensuses"].as_array().map(Vec::len),
+            Some(2)
+        );
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(alignment_path);
+    }
+
+    #[test]
+    fn labeled_confidence_calibration_and_jackknife_are_reported() {
+        let path =
+            std::env::temp_dir().join(format!("reputils-calibration-{}.json", std::process::id()));
+        fs::write(&path, r#"{"schema_version":"reputils.confidence-calibration.v1","source":"held-out curated families","bins":[{"minimum_score":0.0,"maximum_score":1.0,"estimated_probability_correct":0.9,"sample_size":100}]}"#).unwrap();
+        let calibration = load_confidence_calibration(Some(&path)).unwrap().unwrap();
+        let alignment = ali(&[("a", "ACGTACGT"), ("b", "ACGTACGT"), ("c", "ACGTACGT")]);
+        let stats = column_statistics(&alignment);
+        let config = BoundaryConfig {
+            smoothing_window: 3,
+            minimum_body_length: 4,
+            minimum_occupancy: 0.4,
+            minimum_copies: 3,
+            extension: 0,
+        };
+        let boundary = infer_boundaries(&stats, &config, alignment.len()).unwrap();
+        let subfamilies = subfamily_analysis(&alignment, 4);
+        let assessment = confidence_assessment(ConfidenceEvidence {
+            usable: 3,
+            boundary: &boundary,
+            subfamilies: &subfamilies,
+            stats: &stats,
+            structural: &[],
+            domains: &[],
+            domain_hints: &[],
+            alignment: &alignment,
+            config: &config,
+            calibration: Some(&calibration),
+        });
+        assert_eq!(assessment.calibrated_probability, Some(0.9));
+        assert_eq!(assessment.calibration_sample_size, Some(100));
+        assert!(matches!(assessment.tier, ConfidenceTier::High));
+        assert_eq!(assessment.jackknife_replicates, 3);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn host_domain_coverage_produces_strong_review_signal() {
+        let rules = DomainRuleSet {
+            rules: vec![DomainRule {
+                id: "host".into(),
+                patterns: vec!["kinase".into()],
+                te_associated: false,
+                architecture_hint: None,
+                warning_code: None,
+                warning_message: None,
+            }],
+        };
+        let hit = DomainHit {
+            sequence_id: "refined_consensus".into(),
+            source_type: "refined_consensus".into(),
+            domain_name: "protein kinase".into(),
+            accession: "PF00069".into(),
+            description: String::new(),
+            evalue: 1e-30,
+            conditional_evalue: 1e-30,
+            bitscore: 100.0,
+            bias: 0.0,
+            aa_start: 1,
+            aa_end: 30,
+            nucleotide_start: Some(0),
+            nucleotide_end: Some(90),
+            strand: Some("+".into()),
+            frame: Some(1),
+            coverage: 0.9,
+            partial: false,
+        };
+        let (assessment, warnings) = assess_host_domains(&[hit], &rules, 100, &[]);
+        assert_eq!(assessment.assessment, "strong_host_like_domain_signal");
+        assert!(assessment.host_domain_fraction_of_consensus >= 0.9);
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.code == "possible_host_gene"));
     }
 }
