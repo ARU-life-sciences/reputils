@@ -2,7 +2,7 @@ use clap::{App, Arg};
 use std::process;
 
 use reputils::con::make_consensus;
-use reputils::curate::{run as run_curate, CurateOptions};
+use reputils::curate::{run as run_curate, run_benchmark, BenchmarkOptions, CurateOptions};
 use reputils::div::diversity_windows;
 use reputils::dot::dot;
 use reputils::html::render_html;
@@ -376,14 +376,56 @@ fn main() {
                 .arg(Arg::with_name("confidence_calibration").long("confidence-calibration").takes_value(true).help("Optional labeled reputils.confidence-calibration.v1 JSON table."))
                 .arg(Arg::with_name("scan_selected_copies").long("scan-selected-copies").help("Also scan selected genomic copies for protein domains."))
                 .arg(Arg::with_name("split_subfamilies").long("split-subfamilies").help("Emit additional consensuses only for strongly supported candidate subfamilies."))
+                .arg(Arg::with_name("minimum_subfamily_copies").long("min-subfamily-copies").takes_value(true).default_value("3").help("Minimum copies required in every emitted subfamily."))
+                .arg(Arg::with_name("minimum_split_support").long("min-split-support").takes_value(true).default_value("0.50").help("Minimum distance-separation support; values below 0.50 are rejected."))
                 .arg(Arg::with_name("max_copy_domain_targets").long("max-copy-domain-targets").takes_value(true).default_value("10").help("Maximum selected copies searched for domains."))
                 .arg(Arg::with_name("min_copies").long("min-copies").takes_value(true).default_value("3"))
                 .arg(Arg::with_name("force").long("force").help("Replace known curation output files in an existing directory."))
+        )
+        .subcommand(
+            clap::SubCommand::with_name("benchmark")
+                .about("Evaluate curation results against curator-labeled boundary intervals.")
+                .arg(Arg::with_name("labels").long("labels").takes_value(true).required(true).help("reputils.curation-benchmark.v1 label JSON."))
+                .arg(Arg::with_name("out").long("out").takes_value(true).required(true).help("Benchmark output directory."))
+                .arg(Arg::with_name("bins").long("bins").takes_value(true).default_value("5").help("Equal-width heuristic-score bins."))
+                .arg(Arg::with_name("minimum_bin_size").long("minimum-bin-size").takes_value(true).default_value("10").help("Minimum labeled families required to emit a calibration bin."))
+                .arg(Arg::with_name("force").long("force").help("Replace known benchmark outputs in an existing directory."))
         )
         .get_matches();
 
     let subcommand = matches.subcommand();
     match subcommand.0 {
+        "benchmark" => {
+            let matches = subcommand.1.unwrap();
+            let parse_positive = |name: &str| {
+                matches.value_of(name).unwrap().parse().unwrap_or_else(|_| {
+                    eprintln!(
+                        "error: --{} must be a positive integer",
+                        name.replace('_', "-")
+                    );
+                    process::exit(2)
+                })
+            };
+            let options = BenchmarkOptions {
+                labels: PathBuf::from(matches.value_of("labels").unwrap()),
+                out: PathBuf::from(matches.value_of("out").unwrap()),
+                bins: parse_positive("bins"),
+                minimum_bin_size: parse_positive("minimum_bin_size"),
+                force: matches.is_present("force"),
+            };
+            match run_benchmark(&options) {
+                Ok(result) => eprintln!(
+                    "[+] Benchmark complete: {} ({} families; boundary accuracy {:.3})",
+                    options.out.display(),
+                    result.summary.assessed_families,
+                    result.summary.boundary_pair_accuracy
+                ),
+                Err(error) => {
+                    eprintln!("error: {}", error);
+                    process::exit(1);
+                }
+            }
+        }
         "curate" => {
             let matches = subcommand.1.unwrap();
             let path = |name: &str| matches.value_of(name).map(PathBuf::from);
@@ -412,6 +454,22 @@ fn main() {
                 confidence_calibration: path("confidence_calibration"),
                 scan_selected_copies: matches.is_present("scan_selected_copies"),
                 split_subfamilies: matches.is_present("split_subfamilies"),
+                minimum_subfamily_copies: matches
+                    .value_of("minimum_subfamily_copies")
+                    .unwrap()
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: --min-subfamily-copies must be an integer");
+                        process::exit(2)
+                    }),
+                minimum_split_support: matches
+                    .value_of("minimum_split_support")
+                    .unwrap()
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: --min-split-support must be a number");
+                        process::exit(2)
+                    }),
                 max_copy_domain_targets: matches
                     .value_of("max_copy_domain_targets")
                     .unwrap()

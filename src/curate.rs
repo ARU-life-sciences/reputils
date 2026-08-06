@@ -6,7 +6,8 @@
 use bio::io::fasta;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::convert::TryFrom;
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
@@ -904,6 +905,12 @@ pub struct SubfamilyEvidence {
     pub mean_between_cluster_distance: Option<f64>,
     pub support_for_splitting: f64,
     pub insufficient_pairs: usize,
+    pub clustering_threshold: f64,
+    pub method_cluster_counts: BTreeMap<String, usize>,
+    pub method_agreement: f64,
+    pub threshold_stability: f64,
+    pub copy_resampling_stability: Option<f64>,
+    pub robust_split_supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -912,72 +919,223 @@ pub struct SubfamilyConsensus {
     pub members: Vec<String>,
     pub selected_members: Vec<String>,
     pub consensus: RefinedConsensus,
+    pub boundary_result: BoundaryResult,
     pub split_support: f64,
     pub confidence_tier: ConfidenceTier,
     pub consensus_file: String,
     pub alignment_file: String,
 }
+#[derive(Clone, Copy)]
+enum ClusterLinkage {
+    Single,
+    Average,
+    Complete,
+}
+
 #[allow(clippy::needless_range_loop)]
-pub fn subfamily_analysis(alignment: &Alignment, minimum_overlap: usize) -> SubfamilyEvidence {
+fn pairwise_distance_matrix(
+    alignment: &Alignment,
+    minimum_overlap: usize,
+) -> (Vec<Vec<Option<f64>>>, Vec<f64>, usize) {
     let n = alignment.len();
-    let mut d = vec![vec![None; n]; n];
+    let mut distances = vec![vec![None; n]; n];
     let mut vals = Vec::new();
     let mut insufficient = 0;
     for i in 0..n {
+        distances[i][i] = Some(0.0);
         for j in i + 1..n {
             if let Some((id, _)) = sequence_identity(
                 &alignment.copies[i].sequence,
                 &alignment.copies[j].sequence,
                 minimum_overlap,
             ) {
-                d[i][j] = Some(1.0 - id);
-                d[j][i] = d[i][j];
+                distances[i][j] = Some(1.0 - id);
+                distances[j][i] = distances[i][j];
                 vals.push(1.0 - id)
             } else {
                 insufficient += 1
             }
         }
     }
+    (distances, vals, insufficient)
+}
+
+fn normalize_cluster_membership(mut groups: Vec<Vec<usize>>, n: usize) -> Vec<usize> {
+    groups.iter_mut().for_each(|group| group.sort_unstable());
+    groups.sort_by_key(|group| group[0]);
+    let mut membership = vec![0; n];
+    for (cluster, group) in groups.iter().enumerate() {
+        for member in group {
+            membership[*member] = cluster;
+        }
+    }
+    membership
+}
+
+#[allow(clippy::needless_range_loop)]
+fn cluster_membership(
+    distances: &[Vec<Option<f64>>],
+    threshold: f64,
+    linkage: ClusterLinkage,
+) -> Vec<usize> {
+    let n = distances.len();
+    if matches!(linkage, ClusterLinkage::Single) {
+        let mut parents: Vec<usize> = (0..n).collect();
+        fn root(p: &mut [usize], mut x: usize) -> usize {
+            while p[x] != x {
+                p[x] = p[p[x]];
+                x = p[x]
+            }
+            x
+        }
+        for i in 0..n {
+            for j in i + 1..n {
+                if distances[i][j].is_some_and(|value| value <= threshold) {
+                    let a = root(&mut parents, i);
+                    let b = root(&mut parents, j);
+                    parents[a] = b;
+                }
+            }
+        }
+        let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for index in 0..n {
+            groups
+                .entry(root(&mut parents, index))
+                .or_default()
+                .push(index);
+        }
+        return normalize_cluster_membership(groups.into_values().collect(), n);
+    }
+
+    let mut groups: Vec<Vec<usize>> = (0..n).map(|index| vec![index]).collect();
+    loop {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for a in 0..groups.len() {
+            for b in a + 1..groups.len() {
+                let values: Vec<_> = groups[a]
+                    .iter()
+                    .flat_map(|left| {
+                        groups[b]
+                            .iter()
+                            .filter_map(move |right| distances[*left][*right])
+                    })
+                    .collect();
+                if values.is_empty()
+                    || (matches!(linkage, ClusterLinkage::Complete)
+                        && values.len() != groups[a].len() * groups[b].len())
+                {
+                    continue;
+                }
+                let distance = if matches!(linkage, ClusterLinkage::Complete) {
+                    values.iter().copied().fold(0.0, f64::max)
+                } else {
+                    values.iter().sum::<f64>() / values.len() as f64
+                };
+                if distance <= threshold
+                    && best.is_none_or(|current| {
+                        distance < current.0
+                            || (distance == current.0 && (a, b) < (current.1, current.2))
+                    })
+                {
+                    best = Some((distance, a, b));
+                }
+            }
+        }
+        let Some((_, a, b)) = best else { break };
+        let merged = groups.remove(b);
+        groups[a].extend(merged);
+    }
+    normalize_cluster_membership(groups, n)
+}
+
+fn cluster_count(membership: &[usize]) -> usize {
+    membership
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |value| value + 1)
+}
+
+fn coassignment_agreement(left: &[usize], right: &[usize]) -> f64 {
+    let mut compared = 0usize;
+    let mut agreed = 0usize;
+    for i in 0..left.len() {
+        for j in i + 1..left.len() {
+            compared += 1;
+            agreed += usize::from((left[i] == left[j]) == (right[i] == right[j]));
+        }
+    }
+    if compared == 0 {
+        1.0
+    } else {
+        agreed as f64 / compared as f64
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+pub fn subfamily_analysis(alignment: &Alignment, minimum_overlap: usize) -> SubfamilyEvidence {
+    let n = alignment.len();
+    let (distances, vals, insufficient) = pairwise_distance_matrix(alignment, minimum_overlap);
     let threshold = if vals.is_empty() {
         0.15
     } else {
         (vals.iter().sum::<f64>() / vals.len() as f64 + 0.08).min(0.25)
     };
-    let mut cluster: Vec<usize> = (0..n).collect();
-    fn root(p: &mut [usize], mut x: usize) -> usize {
-        while p[x] != x {
-            p[x] = p[p[x]];
-            x = p[x]
+    let single = cluster_membership(&distances, threshold, ClusterLinkage::Single);
+    let average = cluster_membership(&distances, threshold, ClusterLinkage::Average);
+    let complete = cluster_membership(&distances, threshold, ClusterLinkage::Complete);
+    let mut method_cluster_counts = BTreeMap::new();
+    method_cluster_counts.insert("single".into(), cluster_count(&single));
+    method_cluster_counts.insert("average".into(), cluster_count(&average));
+    method_cluster_counts.insert("complete".into(), cluster_count(&complete));
+    let method_agreement = (coassignment_agreement(&single, &average)
+        + coassignment_agreement(&single, &complete))
+        / 2.0;
+    let lower = cluster_membership(
+        &distances,
+        (threshold - 0.03).max(0.0),
+        ClusterLinkage::Single,
+    );
+    let upper = cluster_membership(
+        &distances,
+        (threshold + 0.03).min(1.0),
+        ClusterLinkage::Single,
+    );
+    let threshold_stability =
+        (coassignment_agreement(&single, &lower) + coassignment_agreement(&single, &upper)) / 2.0;
+
+    let mut resampling_agreements = Vec::new();
+    let step = (n / 20).max(1);
+    for omitted in (0..n).step_by(step).take(20) {
+        let retained: Vec<_> = (0..n).filter(|index| *index != omitted).collect();
+        if retained.len() < 2 {
+            continue;
         }
-        x
+        let subset: Vec<Vec<Option<f64>>> = retained
+            .iter()
+            .map(|left| {
+                retained
+                    .iter()
+                    .map(|right| distances[*left][*right])
+                    .collect()
+            })
+            .collect();
+        let observed = cluster_membership(&subset, threshold, ClusterLinkage::Single);
+        let expected: Vec<_> = retained.iter().map(|index| single[*index]).collect();
+        resampling_agreements.push(coassignment_agreement(&expected, &observed));
     }
-    for i in 0..n {
-        for j in i + 1..n {
-            if d[i][j].is_some_and(|x| x <= threshold) {
-                let a = root(&mut cluster, i);
-                let b = root(&mut cluster, j);
-                cluster[a] = b
-            }
-        }
-    }
-    let mut ids = HashMap::new();
+    let copy_resampling_stability = (!resampling_agreements.is_empty())
+        .then(|| resampling_agreements.iter().sum::<f64>() / resampling_agreements.len() as f64);
     let mut membership = BTreeMap::new();
-    let mut next = 0;
-    for (i, c) in alignment.copies.iter().enumerate() {
-        let r = root(&mut cluster, i);
-        let id = *ids.entry(r).or_insert_with(|| {
-            let x = next;
-            next += 1;
-            x
-        });
-        membership.insert(c.id.clone(), id);
+    for (copy, cluster) in alignment.copies().iter().zip(&single) {
+        membership.insert(copy.id.clone(), *cluster);
     }
     let mut within = Vec::new();
     let mut between = Vec::new();
     for i in 0..n {
         for j in i + 1..n {
-            if let Some(x) = d[i][j] {
-                if membership[&alignment.copies[i].id] == membership[&alignment.copies[j].id] {
+            if let Some(x) = distances[i][j] {
+                if single[i] == single[j] {
                     within.push(x)
                 } else {
                     between.push(x)
@@ -998,13 +1156,28 @@ pub fn subfamily_analysis(alignment: &Alignment, minimum_overlap: usize) -> Subf
         (Some(a), Some(b)) => ((b - a) / b.max(0.001)).clamp(0.0, 1.0),
         _ => 0.0,
     };
+    let candidate_clusters = cluster_count(&single);
+    let robust_split_supported = candidate_clusters > 1
+        && support >= 0.50
+        && method_agreement >= 0.90
+        && threshold_stability >= 0.80
+        && copy_resampling_stability.is_some_and(|value| value >= 0.80)
+        && method_cluster_counts
+            .values()
+            .all(|count| *count == candidate_clusters);
     SubfamilyEvidence {
-        candidate_clusters: next,
+        candidate_clusters,
         cluster_membership: membership,
         mean_within_cluster_distance: wi,
         mean_between_cluster_distance: be,
         support_for_splitting: support,
         insufficient_pairs: insufficient,
+        clustering_threshold: threshold,
+        method_cluster_counts,
+        method_agreement,
+        threshold_stability,
+        copy_resampling_stability,
+        robust_split_supported,
     }
 }
 fn build_subfamily_consensuses(
@@ -1013,6 +1186,7 @@ fn build_subfamily_consensuses(
     boundary: &BoundaryResult,
     evidence: &SubfamilyEvidence,
     minimum_cluster_copies: usize,
+    minimum_split_support: f64,
     out: &Path,
 ) -> Vec<SubfamilyConsensus> {
     let separated = match (
@@ -1022,7 +1196,10 @@ fn build_subfamily_consensuses(
         (Some(within), Some(between)) => between >= within + 0.05,
         _ => false,
     };
-    if evidence.candidate_clusters < 2 || evidence.support_for_splitting < 0.50 || !separated {
+    if !evidence.robust_split_supported
+        || evidence.support_for_splitting < minimum_split_support
+        || !separated
+    {
         return Vec::new();
     }
     let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -1063,9 +1240,38 @@ fn build_subfamily_consensuses(
                 .iter()
                 .map(|index| alignment.copies()[*index].id.clone())
                 .collect();
-            let consensus =
-                refined_consensus(alignment, &selected, metrics, boundary.left, boundary.right);
-            let confidence_tier = if members.len() >= 5 && evidence.support_for_splitting >= 0.70 {
+            let records = members
+                .iter()
+                .map(|index| alignment.copies()[*index].clone())
+                .collect();
+            let cluster_boundary = Alignment::from_records(records, minimum_cluster_copies)
+                .ok()
+                .and_then(|cluster_alignment| {
+                    let cluster_stats = column_statistics(&cluster_alignment);
+                    infer_boundaries(
+                        &cluster_stats,
+                        &BoundaryConfig {
+                            minimum_body_length: 50.min(cluster_alignment.width()).max(1),
+                            minimum_copies: minimum_cluster_copies.min(cluster_alignment.len()),
+                            ..BoundaryConfig::default()
+                        },
+                        cluster_alignment.len(),
+                    )
+                    .ok()
+                })
+                .unwrap_or_else(|| boundary.clone());
+            let consensus = refined_consensus(
+                alignment,
+                &selected,
+                metrics,
+                cluster_boundary.left,
+                cluster_boundary.right,
+            );
+            let confidence_tier = if members.len() >= 5
+                && evidence.support_for_splitting >= 0.70
+                && evidence.method_agreement >= 0.95
+                && evidence.threshold_stability >= 0.90
+            {
                 ConfidenceTier::High
             } else {
                 ConfidenceTier::Moderate
@@ -1075,6 +1281,7 @@ fn build_subfamily_consensuses(
                 members: member_ids,
                 selected_members: selected_ids,
                 consensus,
+                boundary_result: cluster_boundary,
                 split_support: evidence.support_for_splitting,
                 confidence_tier,
                 consensus_file: out
@@ -1103,9 +1310,30 @@ pub struct DomainRule {
     pub patterns: Vec<String>,
     #[serde(default)]
     pub te_associated: bool,
+    #[serde(default)]
+    pub association: Option<DomainAssociation>,
     pub architecture_hint: Option<ArchitectureHint>,
     pub warning_code: Option<String>,
     pub warning_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DomainAssociation {
+    TeAssociated,
+    HostEnriched,
+    Ubiquitous,
+    Unknown,
+}
+
+fn domain_rule_association(rule: &DomainRule) -> DomainAssociation {
+    rule.association.clone().unwrap_or({
+        if rule.te_associated {
+            DomainAssociation::TeAssociated
+        } else {
+            DomainAssociation::HostEnriched
+        }
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1127,6 +1355,7 @@ impl Default for DomainRuleSet {
                         "retroviral protease".into(),
                     ],
                     te_associated: true,
+                    association: Some(DomainAssociation::TeAssociated),
                     architecture_hint: Some(ArchitectureHint::LtrLike),
                     warning_code: None,
                     warning_message: None,
@@ -1135,6 +1364,7 @@ impl Default for DomainRuleSet {
                     id: "tir-transposase".into(),
                     patterns: vec!["transposase".into(), "dde".into(), "d d e".into()],
                     te_associated: true,
+                    association: Some(DomainAssociation::TeAssociated),
                     architecture_hint: Some(ArchitectureHint::TirLike),
                     warning_code: None,
                     warning_message: None,
@@ -1148,6 +1378,7 @@ impl Default for DomainRuleSet {
                         "endonuclease".into(),
                     ],
                     te_associated: true,
+                    association: Some(DomainAssociation::TeAssociated),
                     architecture_hint: Some(ArchitectureHint::LineLike),
                     warning_code: None,
                     warning_message: None,
@@ -1160,6 +1391,7 @@ impl Default for DomainRuleSet {
                         "helicase".into(),
                     ],
                     te_associated: true,
+                    association: Some(DomainAssociation::TeAssociated),
                     architecture_hint: Some(ArchitectureHint::Unknown),
                     warning_code: None,
                     warning_message: None,
@@ -1168,6 +1400,7 @@ impl Default for DomainRuleSet {
                     id: "tyrosine-recombinase".into(),
                     patterns: vec!["tyrosine recombinase".into()],
                     te_associated: true,
+                    association: Some(DomainAssociation::TeAssociated),
                     architecture_hint: Some(ArchitectureHint::Unknown),
                     warning_code: None,
                     warning_message: None,
@@ -1176,6 +1409,7 @@ impl Default for DomainRuleSet {
                     id: "protein-primed-polymerase".into(),
                     patterns: vec!["protein-primed".into(), "protein primed".into()],
                     te_associated: true,
+                    association: Some(DomainAssociation::TeAssociated),
                     architecture_hint: Some(ArchitectureHint::Unknown),
                     warning_code: None,
                     warning_message: None,
@@ -1203,6 +1437,26 @@ pub struct DomainHit {
     pub frame: Option<i8>,
     pub coverage: f64,
     pub partial: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DomainFragmentChain {
+    pub chain_id: String,
+    pub sequence_id: String,
+    pub source_type: String,
+    pub domain_name: String,
+    pub accession: String,
+    pub strand: String,
+    pub frames: Vec<i8>,
+    pub fragment_count: usize,
+    pub nucleotide_start: usize,
+    pub nucleotide_end: usize,
+    pub combined_coverage: f64,
+    pub combined_bitscore: f64,
+    pub maximum_nucleotide_gap: usize,
+    pub supporting_copy_ids: Vec<String>,
+    pub independent_copy_support: usize,
+    pub recurrent_across_copies: bool,
 }
 pub fn parse_domtblout(path: &Path, source_type: &str) -> Result<Vec<DomainHit>, CurationError> {
     let file = File::open(path).map_err(|e| io_error(path, e))?;
@@ -1315,6 +1569,8 @@ pub enum ConfidenceTier {
 pub struct ConfidenceCalibration {
     pub schema_version: String,
     pub source: String,
+    #[serde(default)]
+    pub labels_sha256: Option<String>,
     pub bins: Vec<ConfidenceCalibrationBin>,
 }
 
@@ -1324,6 +1580,94 @@ pub struct ConfidenceCalibrationBin {
     pub maximum_score: f64,
     pub estimated_probability_correct: f64,
     pub sample_size: usize,
+    #[serde(default)]
+    pub correct_count: Option<usize>,
+    #[serde(default)]
+    pub wilson_lower_95: Option<f64>,
+    #[serde(default)]
+    pub wilson_upper_95: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkBoundaryTruth {
+    pub minimum_1based: usize,
+    pub maximum_1based: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkFamilyLabel {
+    pub family_id: String,
+    pub result_json: String,
+    pub accepted_left: BenchmarkBoundaryTruth,
+    pub accepted_right: BenchmarkBoundaryTruth,
+    #[serde(default)]
+    pub accepted_architectures: Vec<String>,
+    #[serde(default)]
+    pub warning_labels: BTreeMap<String, bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurationBenchmarkLabels {
+    pub schema_version: String,
+    pub source: String,
+    pub families: Vec<BenchmarkFamilyLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkFamilyResult {
+    pub family_id: String,
+    pub result_json: String,
+    pub result_sha256: String,
+    pub predicted_left_1based: usize,
+    pub predicted_right_1based_inclusive: usize,
+    pub left_error: usize,
+    pub right_error: usize,
+    pub left_within_accepted_interval: bool,
+    pub right_within_accepted_interval: bool,
+    pub boundary_pair_correct: bool,
+    pub heuristic_score: f64,
+    pub architecture_correct: Option<bool>,
+    pub warning_true_positives: usize,
+    pub warning_false_positives: usize,
+    pub warning_false_negatives: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkSummary {
+    pub assessed_families: usize,
+    pub boundary_pair_accuracy: f64,
+    pub left_interval_coverage: f64,
+    pub right_interval_coverage: f64,
+    pub mean_left_error: f64,
+    pub mean_right_error: f64,
+    pub architecture_accuracy: Option<f64>,
+    pub warning_precision: Option<f64>,
+    pub warning_recall: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CurationBenchmarkResult {
+    pub schema_version: String,
+    pub reputils_version: String,
+    pub source: String,
+    pub labels_path: String,
+    pub labels_sha256: String,
+    pub requested_bins: usize,
+    pub minimum_bin_size: usize,
+    pub families: Vec<BenchmarkFamilyResult>,
+    pub summary: BenchmarkSummary,
+    pub calibration: Option<ConfidenceCalibration>,
+    pub calibration_status: String,
+    pub output_files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkOptions {
+    pub labels: PathBuf,
+    pub out: PathBuf,
+    pub bins: usize,
+    pub minimum_bin_size: usize,
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1338,6 +1682,41 @@ pub struct ConfidenceAssessment {
     pub calibration_sample_size: Option<usize>,
     pub calibration_source: Option<String>,
     pub calibration_status: String,
+    pub boundary_robustness: BoundaryRobustness,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryInterval {
+    pub minimum: usize,
+    pub lower_decile: usize,
+    pub median: usize,
+    pub upper_decile: usize,
+    pub maximum: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopyBoundaryInfluence {
+    pub copy_id: String,
+    pub left_shift: i64,
+    pub right_shift: i64,
+    pub maximum_absolute_shift: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryRobustness {
+    pub tolerance_columns: usize,
+    pub jackknife_replicates: usize,
+    pub bootstrap_replicates: usize,
+    pub parameter_replicates: usize,
+    pub jackknife_left_stability: Option<f64>,
+    pub jackknife_right_stability: Option<f64>,
+    pub bootstrap_left_stability: Option<f64>,
+    pub bootstrap_right_stability: Option<f64>,
+    pub parameter_left_stability: Option<f64>,
+    pub parameter_right_stability: Option<f64>,
+    pub left_interval: Option<BoundaryInterval>,
+    pub right_interval: Option<BoundaryInterval>,
+    pub influential_copies: Vec<CopyBoundaryInfluence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1368,6 +1747,8 @@ pub struct CurationParameters {
     pub minimum_pairwise_overlap: usize,
     pub scan_selected_copies: bool,
     pub split_subfamilies: bool,
+    pub minimum_subfamily_copies: usize,
+    pub minimum_split_support: f64,
     pub max_copy_domain_targets: usize,
     pub domain_rule_source: String,
     pub boundary: BoundaryConfig,
@@ -1388,9 +1769,17 @@ pub struct HostDomainAssessment {
     pub assessment: String,
     pub te_associated_hits: usize,
     pub host_like_hits: usize,
+    pub host_enriched_hits: usize,
+    pub ubiquitous_hits: usize,
+    pub unknown_rule_hits: usize,
     pub unclassified_hits: usize,
     pub host_domain_fraction_of_consensus: f64,
     pub host_hits_on_selected_copies_only: Vec<String>,
+    pub independent_host_loci: usize,
+    pub recurrent_host_models: Vec<String>,
+    pub boundary_uncertainty: f64,
+    pub terminal_structure_counterevidence: f64,
+    pub evidence_components: BTreeMap<String, f64>,
     pub evidence_score: f64,
 }
 
@@ -1410,6 +1799,7 @@ pub struct CurationResult {
     pub tsd_evidence: Vec<TsdEvidence>,
     pub tsd_support_by_length: BTreeMap<usize, usize>,
     pub domain_evidence: Vec<DomainHit>,
+    pub domain_fragment_chains: Vec<DomainFragmentChain>,
     pub domain_rule_matches: Vec<DomainRuleMatch>,
     pub host_domain_assessment: HostDomainAssessment,
     pub locus_diagnostics: Vec<LocusDiagnostic>,
@@ -1443,15 +1833,22 @@ pub struct CurateOptions {
     pub confidence_calibration: Option<PathBuf>,
     pub scan_selected_copies: bool,
     pub split_subfamilies: bool,
+    pub minimum_subfamily_copies: usize,
+    pub minimum_split_support: f64,
     pub max_copy_domain_targets: usize,
     pub min_copies: usize,
     pub force: bool,
 }
 
 pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
-    if options.threads == 0 || options.min_copies == 0 || options.max_copy_domain_targets == 0 {
+    if options.threads == 0
+        || options.min_copies == 0
+        || options.max_copy_domain_targets == 0
+        || options.minimum_subfamily_copies < 2
+        || !(0.50..=1.0).contains(&options.minimum_split_support)
+    {
         return Err(CurationError::InvalidParameter(
-            "--threads, --min-copies, and --max-copy-domain-targets must be positive".into(),
+            "counts must be positive, --min-subfamily-copies >= 2, and --minimum-split-support in [0.50,1.0]".into(),
         ));
     }
     prepare_output(&options.out, options.force)?;
@@ -1638,11 +2035,16 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
     let (domain_hints, domain_warnings, domain_rule_matches) =
         interpret_domains(&domains, &domain_rules);
     warnings.extend(domain_warnings);
+    let (domain_fragment_chains, domain_chain_warnings) =
+        chain_domain_fragments(&domains, &metadata);
+    warnings.extend(domain_chain_warnings);
     let (host_domain_assessment, host_domain_warnings) = assess_host_domains(
         &domains,
         &domain_rules,
         consensus.sequence.len(),
         &structural,
+        &metadata,
+        &boundaries,
     );
     warnings.extend(host_domain_warnings);
     let (locus_diagnostics, locus_warnings) =
@@ -1654,7 +2056,8 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
             &metrics,
             &boundaries,
             &subfamilies,
-            3,
+            options.minimum_subfamily_copies,
+            options.minimum_split_support,
             &options.out,
         )
     } else {
@@ -1701,6 +2104,40 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
             ));
         }
     }
+    let robustness = &confidence_assessment.boundary_robustness;
+    if robustness
+        .parameter_left_stability
+        .is_some_and(|stability| stability < 0.60)
+        || robustness
+            .parameter_right_stability
+            .is_some_and(|stability| stability < 0.60)
+    {
+        warnings.push(CurationWarning::new(
+            "boundary_parameter_sensitive",
+            "One or both boundaries changed materially across reasonable smoothing, occupancy, and body-length settings",
+            "warning",
+        ));
+    }
+    if robustness
+        .bootstrap_left_stability
+        .is_some_and(|stability| stability < 0.60)
+        || robustness
+            .bootstrap_right_stability
+            .is_some_and(|stability| stability < 0.60)
+    {
+        warnings.push(CurationWarning::new(
+            "boundary_copy_resampling_unstable",
+            "One or both boundaries were recovered in fewer than 60% of deterministic copy-bootstrap replicates",
+            "warning",
+        ));
+    }
+    if !robustness.influential_copies.is_empty() {
+        warnings.push(CurationWarning::new(
+            "boundary_influential_copies",
+            "Removing individual copies moved a boundary beyond the configured robustness tolerance; inspect confidence_assessment.boundary_robustness.influential_copies",
+            "warning",
+        ));
+    }
     let tier = confidence_assessment.tier.clone();
     let mut outputs = BTreeMap::new();
     for name in [
@@ -1711,6 +2148,7 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
         "columns.tsv",
         "structural-evidence.tsv",
         "domains.tsv",
+        "domain-chains.tsv",
         "warnings.tsv",
         "result.json",
         "report.html",
@@ -1774,6 +2212,8 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
             minimum_pairwise_overlap: 50.min(alignment.width()),
             scan_selected_copies: options.scan_selected_copies,
             split_subfamilies: options.split_subfamilies,
+            minimum_subfamily_copies: options.minimum_subfamily_copies,
+            minimum_split_support: options.minimum_split_support,
             max_copy_domain_targets: options.max_copy_domain_targets,
             domain_rule_source,
             boundary: cfg,
@@ -1795,6 +2235,7 @@ pub fn run(options: &CurateOptions) -> Result<CurationResult, CurationError> {
         tsd_evidence,
         tsd_support_by_length,
         domain_evidence: domains,
+        domain_fragment_chains,
         domain_rule_matches,
         host_domain_assessment,
         locus_diagnostics,
@@ -1868,6 +2309,345 @@ fn add_input(map: &mut BTreeMap<String, InputFile>, key: &str, path: &Path) {
 fn checksum(path: &Path) -> Result<String, CurationError> {
     let data = fs::read(path).map_err(|e| io_error(path, e))?;
     Ok(format!("{:x}", Sha256::digest(data)))
+}
+
+fn benchmark_value_usize(
+    value: &serde_json::Value,
+    pointer: &str,
+    path: &Path,
+) -> Result<usize, CurationError> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|number| usize::try_from(number).ok())
+        .ok_or_else(|| {
+            CurationError::InvalidParameter(format!(
+                "{} lacks integer field {pointer}",
+                path.display()
+            ))
+        })
+}
+
+fn benchmark_value_f64(
+    value: &serde_json::Value,
+    pointer: &str,
+    path: &Path,
+) -> Result<f64, CurationError> {
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_f64)
+        .filter(|number| number.is_finite() && (0.0..=1.0).contains(number))
+        .ok_or_else(|| {
+            CurationError::InvalidParameter(format!(
+                "{} lacks finite [0,1] field {pointer}",
+                path.display()
+            ))
+        })
+}
+
+fn distance_from_interval(value: usize, interval: &BenchmarkBoundaryTruth) -> usize {
+    if value < interval.minimum_1based {
+        interval.minimum_1based - value
+    } else {
+        value.saturating_sub(interval.maximum_1based)
+    }
+}
+
+fn wilson_interval(correct: usize, total: usize) -> (f64, f64) {
+    let z = 1.959_963_984_540_054;
+    let n = total as f64;
+    let proportion = correct as f64 / n;
+    let denominator = 1.0 + z * z / n;
+    let centre = (proportion + z * z / (2.0 * n)) / denominator;
+    let margin =
+        z * ((proportion * (1.0 - proportion) / n + z * z / (4.0 * n * n)).sqrt()) / denominator;
+    ((centre - margin).max(0.0), (centre + margin).min(1.0))
+}
+
+fn benchmark_calibration(
+    observations: &[(f64, bool)],
+    bins: usize,
+    minimum_bin_size: usize,
+    source: &str,
+    labels_sha256: &str,
+) -> Option<ConfidenceCalibration> {
+    let mut grouped: Vec<Vec<(f64, bool)>> = vec![Vec::new(); bins];
+    for observation in observations {
+        let index = ((observation.0 * bins as f64).floor() as usize).min(bins - 1);
+        grouped[index].push(*observation);
+    }
+    let calibration_bins: Vec<_> = grouped
+        .into_iter()
+        .enumerate()
+        .filter(|(_, values)| values.len() >= minimum_bin_size)
+        .map(|(index, values)| {
+            let correct = values.iter().filter(|(_, correct)| *correct).count();
+            let (lower, upper) = wilson_interval(correct, values.len());
+            ConfidenceCalibrationBin {
+                minimum_score: index as f64 / bins as f64,
+                maximum_score: (index + 1) as f64 / bins as f64,
+                estimated_probability_correct: correct as f64 / values.len() as f64,
+                sample_size: values.len(),
+                correct_count: Some(correct),
+                wilson_lower_95: Some(lower),
+                wilson_upper_95: Some(upper),
+            }
+        })
+        .collect();
+    (!calibration_bins.is_empty()).then(|| ConfidenceCalibration {
+        schema_version: "reputils.confidence-calibration.v1".into(),
+        source: source.into(),
+        labels_sha256: Some(labels_sha256.into()),
+        bins: calibration_bins,
+    })
+}
+
+pub fn run_benchmark(options: &BenchmarkOptions) -> Result<CurationBenchmarkResult, CurationError> {
+    if options.bins == 0 || options.bins > 100 || options.minimum_bin_size == 0 {
+        return Err(CurationError::InvalidParameter(
+            "--bins must be 1..=100 and --minimum-bin-size must be positive".into(),
+        ));
+    }
+    let labels_file =
+        File::open(&options.labels).map_err(|error| io_error(&options.labels, error))?;
+    let labels: CurationBenchmarkLabels = serde_json::from_reader(labels_file)?;
+    if labels.schema_version != "reputils.curation-benchmark.v1"
+        || labels.source.trim().is_empty()
+        || labels.families.is_empty()
+    {
+        return Err(CurationError::InvalidParameter(
+            "benchmark labels need schema reputils.curation-benchmark.v1, a source, and families"
+                .into(),
+        ));
+    }
+    let mut seen = HashSet::new();
+    for family in &labels.families {
+        if family.family_id.trim().is_empty()
+            || !seen.insert(family.family_id.clone())
+            || family.accepted_left.minimum_1based == 0
+            || family.accepted_right.minimum_1based == 0
+            || family.accepted_left.maximum_1based < family.accepted_left.minimum_1based
+            || family.accepted_right.maximum_1based < family.accepted_right.minimum_1based
+        {
+            return Err(CurationError::InvalidParameter(
+                "benchmark family IDs must be unique and boundary intervals valid".into(),
+            ));
+        }
+    }
+    prepare_output(&options.out, options.force)?;
+    let labels_sha256 = checksum(&options.labels)?;
+    let base = options.labels.parent().unwrap_or_else(|| Path::new("."));
+    let mut families = Vec::new();
+    for label in &labels.families {
+        let configured_path = Path::new(&label.result_json);
+        let result_path = if configured_path.is_absolute() {
+            configured_path.to_path_buf()
+        } else {
+            base.join(configured_path)
+        };
+        let result_file =
+            File::open(&result_path).map_err(|error| io_error(&result_path, error))?;
+        let value: serde_json::Value = serde_json::from_reader(result_file)?;
+        if value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_str)
+            != Some(SCHEMA_VERSION)
+        {
+            return Err(CurationError::InvalidParameter(format!(
+                "{} is not a {SCHEMA_VERSION} result",
+                result_path.display()
+            )));
+        }
+        let predicted_left =
+            benchmark_value_usize(&value, "/boundary_result/left", &result_path)? + 1;
+        let predicted_right =
+            benchmark_value_usize(&value, "/boundary_result/right", &result_path)?;
+        let heuristic_score = benchmark_value_f64(
+            &value,
+            "/confidence_assessment/heuristic_score",
+            &result_path,
+        )?;
+        let left_error = distance_from_interval(predicted_left, &label.accepted_left);
+        let right_error = distance_from_interval(predicted_right, &label.accepted_right);
+        let predicted_warnings: HashSet<_> = value
+            .get("warnings")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|warning| warning.get("code").and_then(serde_json::Value::as_str))
+            .collect();
+        let mut warning_true_positives = 0usize;
+        let mut warning_false_positives = 0usize;
+        let mut warning_false_negatives = 0usize;
+        for (code, expected) in &label.warning_labels {
+            match (*expected, predicted_warnings.contains(code.as_str())) {
+                (true, true) => warning_true_positives += 1,
+                (false, true) => warning_false_positives += 1,
+                (true, false) => warning_false_negatives += 1,
+                (false, false) => {}
+            }
+        }
+        let architecture_correct = if label.accepted_architectures.is_empty() {
+            None
+        } else {
+            let accepted: HashSet<_> = label
+                .accepted_architectures
+                .iter()
+                .map(|architecture| architecture.to_ascii_lowercase())
+                .collect();
+            Some(
+                value
+                    .get("architecture_hints")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .any(|architecture| accepted.contains(&architecture.to_ascii_lowercase())),
+            )
+        };
+        families.push(BenchmarkFamilyResult {
+            family_id: label.family_id.clone(),
+            result_json: result_path.display().to_string(),
+            result_sha256: checksum(&result_path)?,
+            predicted_left_1based: predicted_left,
+            predicted_right_1based_inclusive: predicted_right,
+            left_error,
+            right_error,
+            left_within_accepted_interval: left_error == 0,
+            right_within_accepted_interval: right_error == 0,
+            boundary_pair_correct: left_error == 0 && right_error == 0,
+            heuristic_score,
+            architecture_correct,
+            warning_true_positives,
+            warning_false_positives,
+            warning_false_negatives,
+        });
+    }
+    let count = families.len() as f64;
+    let sum = |field: fn(&BenchmarkFamilyResult) -> usize| {
+        families.iter().map(field).sum::<usize>() as f64
+    };
+    let architecture_values: Vec<_> = families
+        .iter()
+        .filter_map(|family| family.architecture_correct)
+        .collect();
+    let tp = sum(|family| family.warning_true_positives);
+    let fp = sum(|family| family.warning_false_positives);
+    let fn_count = sum(|family| family.warning_false_negatives);
+    let summary = BenchmarkSummary {
+        assessed_families: families.len(),
+        boundary_pair_accuracy: families
+            .iter()
+            .filter(|family| family.boundary_pair_correct)
+            .count() as f64
+            / count,
+        left_interval_coverage: families
+            .iter()
+            .filter(|family| family.left_within_accepted_interval)
+            .count() as f64
+            / count,
+        right_interval_coverage: families
+            .iter()
+            .filter(|family| family.right_within_accepted_interval)
+            .count() as f64
+            / count,
+        mean_left_error: sum(|family| family.left_error) / count,
+        mean_right_error: sum(|family| family.right_error) / count,
+        architecture_accuracy: (!architecture_values.is_empty()).then(|| {
+            architecture_values
+                .iter()
+                .filter(|correct| **correct)
+                .count() as f64
+                / architecture_values.len() as f64
+        }),
+        warning_precision: ((tp + fp) > 0.0).then(|| tp / (tp + fp)),
+        warning_recall: ((tp + fn_count) > 0.0).then(|| tp / (tp + fn_count)),
+    };
+    let observations: Vec<_> = families
+        .iter()
+        .map(|family| (family.heuristic_score, family.boundary_pair_correct))
+        .collect();
+    let calibration = benchmark_calibration(
+        &observations,
+        options.bins,
+        options.minimum_bin_size,
+        &format!(
+            "{}; generated from curator-labeled boundary intervals",
+            labels.source
+        ),
+        &labels_sha256,
+    );
+    let calibration_status = if calibration.is_some() {
+        "generated; validate on families independent of the calibration labels before use".into()
+    } else {
+        "not generated: no score bin met minimum_bin_size".into()
+    };
+    let mut output_files = BTreeMap::new();
+    output_files.insert(
+        "benchmark.json".into(),
+        options.out.join("benchmark.json").display().to_string(),
+    );
+    output_files.insert(
+        "families.tsv".into(),
+        options.out.join("families.tsv").display().to_string(),
+    );
+    if calibration.is_some() {
+        output_files.insert(
+            "calibration.json".into(),
+            options.out.join("calibration.json").display().to_string(),
+        );
+    } else if options.force {
+        let stale_calibration = options.out.join("calibration.json");
+        if stale_calibration.is_file() {
+            fs::remove_file(&stale_calibration)
+                .map_err(|error| io_error(&stale_calibration, error))?;
+        }
+    }
+    let result = CurationBenchmarkResult {
+        schema_version: "reputils.curation-benchmark-result.v1".into(),
+        reputils_version: env!("CARGO_PKG_VERSION").into(),
+        source: labels.source,
+        labels_path: options.labels.display().to_string(),
+        labels_sha256,
+        requested_bins: options.bins,
+        minimum_bin_size: options.minimum_bin_size,
+        families,
+        summary,
+        calibration,
+        calibration_status,
+        output_files,
+    };
+    let benchmark_path = options.out.join("benchmark.json");
+    serde_json::to_writer_pretty(create(&benchmark_path)?, &result)?;
+    let families_path = options.out.join("families.tsv");
+    let mut family_file = create(&families_path)?;
+    writeln!(family_file, "family_id	result_json	predicted_left_1based	predicted_right_1based_inclusive	left_error	right_error	left_within_interval	right_within_interval	boundary_pair_correct	heuristic_score	architecture_correct	warning_true_positives	warning_false_positives	warning_false_negatives").map_err(|error| io_error(&families_path, error))?;
+    for family in &result.families {
+        writeln!(
+            family_file,
+            "{}	{}	{}	{}	{}	{}	{}	{}	{}	{:.6}	{}	{}	{}	{}",
+            family.family_id,
+            family.result_json,
+            family.predicted_left_1based,
+            family.predicted_right_1based_inclusive,
+            family.left_error,
+            family.right_error,
+            family.left_within_accepted_interval,
+            family.right_within_accepted_interval,
+            family.boundary_pair_correct,
+            family.heuristic_score,
+            opt(&family.architecture_correct),
+            family.warning_true_positives,
+            family.warning_false_positives,
+            family.warning_false_negatives
+        )
+        .map_err(|error| io_error(&families_path, error))?;
+    }
+    if let Some(calibration) = &result.calibration {
+        let calibration_path = options.out.join("calibration.json");
+        serde_json::to_writer_pretty(create(&calibration_path)?, calibration)?;
+    }
+    Ok(result)
 }
 
 fn parse_manifest(path: &Path) -> Result<HashMap<String, CopyMetadata>, CurationError> {
@@ -2485,7 +3265,7 @@ fn interpret_domains(
                     sequence_id: hit.sequence_id.clone(),
                     domain_name: hit.domain_name.clone(),
                 });
-                te_like |= rule.te_associated;
+                te_like |= domain_rule_association(rule) == DomainAssociation::TeAssociated;
                 if let Some(hint) = &rule.architecture_hint {
                     if !hints.contains(hint) {
                         hints.push(hint.clone());
@@ -2581,6 +3361,235 @@ fn interpret_domains(
     }
     (hints, warnings, matches)
 }
+
+fn independent_copy_key(copy_id: &str, metadata: &HashMap<String, CopyMetadata>) -> String {
+    let Some(value) = metadata.get(copy_id) else {
+        return format!("copy:{copy_id}");
+    };
+    if let Some(locus_id) = &value.locus_id {
+        return format!("locus:{locus_id}");
+    }
+    if let (Some(subject), Some(start), Some(end)) =
+        (&value.subject_id, value.genomic_start, value.genomic_end)
+    {
+        return format!("interval:{subject}:{start}:{end}");
+    }
+    format!("copy:{copy_id}")
+}
+
+fn domain_chain_key(hit: &DomainHit) -> String {
+    if hit.accession == "-" || hit.accession.is_empty() {
+        hit.domain_name.to_ascii_lowercase()
+    } else {
+        hit.accession.to_ascii_lowercase()
+    }
+}
+
+fn chain_domain_fragments(
+    hits: &[DomainHit],
+    metadata: &HashMap<String, CopyMetadata>,
+) -> (Vec<DomainFragmentChain>, Vec<CurationWarning>) {
+    let mut groups: BTreeMap<(String, String, String), Vec<&DomainHit>> = BTreeMap::new();
+    for hit in hits.iter().filter(|hit| {
+        hit.partial
+            && hit.nucleotide_start.is_some()
+            && hit.nucleotide_end.is_some()
+            && hit.frame.is_some()
+            && hit.strand.is_some()
+    }) {
+        groups
+            .entry((
+                hit.sequence_id.clone(),
+                domain_chain_key(hit),
+                hit.strand.clone().unwrap_or_default(),
+            ))
+            .or_default()
+            .push(hit);
+    }
+    let mut chains = Vec::new();
+    for ((sequence_id, _, strand), mut fragments) in groups {
+        fragments.sort_by(|left, right| {
+            if strand == "-" {
+                right
+                    .nucleotide_end
+                    .cmp(&left.nucleotide_end)
+                    .then_with(|| right.nucleotide_start.cmp(&left.nucleotide_start))
+            } else {
+                left.nucleotide_start
+                    .cmp(&right.nucleotide_start)
+                    .then_with(|| left.nucleotide_end.cmp(&right.nucleotide_end))
+            }
+        });
+        let mut runs: Vec<Vec<&DomainHit>> = Vec::new();
+        for fragment in fragments {
+            let compatible = runs
+                .last()
+                .and_then(|run| run.last())
+                .is_some_and(|previous| {
+                    let (previous_start, previous_end) = (
+                        previous.nucleotide_start.unwrap_or(0),
+                        previous.nucleotide_end.unwrap_or(0),
+                    );
+                    let (current_start, current_end) = (
+                        fragment.nucleotide_start.unwrap_or(0),
+                        fragment.nucleotide_end.unwrap_or(0),
+                    );
+                    let gap = if previous_end < current_start {
+                        current_start - previous_end
+                    } else {
+                        previous_start.saturating_sub(current_end)
+                    };
+                    let overlap = previous_end
+                        .min(current_end)
+                        .saturating_sub(previous_start.max(current_start));
+                    gap <= 150 && overlap <= 60
+                });
+            if compatible {
+                if let Some(run) = runs.last_mut() {
+                    run.push(fragment);
+                } else {
+                    runs.push(vec![fragment]);
+                }
+            } else {
+                runs.push(vec![fragment]);
+            }
+        }
+        for run in runs {
+            let frames: BTreeSet<_> = run.iter().filter_map(|hit| hit.frame).collect();
+            let combined_coverage = run.iter().map(|hit| hit.coverage).sum::<f64>().min(1.0);
+            if run.len() < 2 || frames.len() < 2 || combined_coverage < 0.50 {
+                continue;
+            }
+            let nucleotide_start = run
+                .iter()
+                .filter_map(|hit| hit.nucleotide_start)
+                .min()
+                .unwrap_or(0);
+            let nucleotide_end = run
+                .iter()
+                .filter_map(|hit| hit.nucleotide_end)
+                .max()
+                .unwrap_or(nucleotide_start);
+            let maximum_nucleotide_gap = run
+                .windows(2)
+                .map(|pair| {
+                    let left_start = pair[0].nucleotide_start.unwrap_or(0);
+                    let left_end = pair[0].nucleotide_end.unwrap_or(0);
+                    let right_start = pair[1].nucleotide_start.unwrap_or(0);
+                    let right_end = pair[1].nucleotide_end.unwrap_or(0);
+                    if left_end < right_start {
+                        right_start - left_end
+                    } else {
+                        left_start.saturating_sub(right_end)
+                    }
+                })
+                .max()
+                .unwrap_or(0);
+            let first = run[0];
+            chains.push(DomainFragmentChain {
+                chain_id: format!("chain-{}", chains.len() + 1),
+                sequence_id: sequence_id.clone(),
+                source_type: first.source_type.clone(),
+                domain_name: first.domain_name.clone(),
+                accession: first.accession.clone(),
+                strand: strand.clone(),
+                frames: frames.into_iter().collect(),
+                fragment_count: run.len(),
+                nucleotide_start,
+                nucleotide_end,
+                combined_coverage,
+                combined_bitscore: run.iter().map(|hit| hit.bitscore).sum(),
+                maximum_nucleotide_gap,
+                supporting_copy_ids: Vec::new(),
+                independent_copy_support: 0,
+                recurrent_across_copies: false,
+            });
+        }
+    }
+
+    let mut support: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    for chain in chains
+        .iter()
+        .filter(|chain| chain.source_type == "selected_copy")
+    {
+        let entry = support
+            .entry(if chain.accession == "-" || chain.accession.is_empty() {
+                chain.domain_name.to_ascii_lowercase()
+            } else {
+                chain.accession.to_ascii_lowercase()
+            })
+            .or_default();
+        entry.0.insert(chain.sequence_id.clone());
+        entry
+            .1
+            .insert(independent_copy_key(&chain.sequence_id, metadata));
+    }
+    for chain in &mut chains {
+        let key = if chain.accession == "-" || chain.accession.is_empty() {
+            chain.domain_name.to_ascii_lowercase()
+        } else {
+            chain.accession.to_ascii_lowercase()
+        };
+        if let Some((copy_ids, independent)) = support.get(&key) {
+            chain.supporting_copy_ids = copy_ids.iter().cloned().collect();
+            chain.independent_copy_support = independent.len();
+            chain.recurrent_across_copies = independent.len() >= 2;
+        }
+    }
+
+    let mut warnings = Vec::new();
+    if chains
+        .iter()
+        .any(|chain| chain.source_type == "refined_consensus" && !chain.recurrent_across_copies)
+    {
+        warnings.push(CurationWarning::new(
+            "possible_consensus_frameshift",
+            "Compatible partial hits from one domain cross translation frames in the refined consensus but are not recurrent in two independent selected copies",
+            "warning",
+        ));
+    }
+    if chains.iter().any(|chain| chain.recurrent_across_copies) {
+        warnings.push(CurationWarning::new(
+            "recurrent_frameshifted_domain",
+            "Compatible partial hits crossing translation frames recur in at least two independent selected copies",
+            "info",
+        ));
+    }
+    let recurrent_keys: HashSet<_> = chains
+        .iter()
+        .filter(|chain| chain.recurrent_across_copies)
+        .map(|chain| {
+            if chain.accession == "-" || chain.accession.is_empty() {
+                chain.domain_name.to_ascii_lowercase()
+            } else {
+                chain.accession.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    let consensus_keys: HashSet<_> = chains
+        .iter()
+        .filter(|chain| chain.source_type == "refined_consensus")
+        .map(|chain| {
+            if chain.accession == "-" || chain.accession.is_empty() {
+                chain.domain_name.to_ascii_lowercase()
+            } else {
+                chain.accession.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    if recurrent_keys
+        .iter()
+        .any(|key| !consensus_keys.contains(key))
+    {
+        warnings.push(CurationWarning::new(
+            "recurrent_domain_disruption_missing_from_consensus",
+            "A cross-frame domain chain recurs in selected copies but is absent from the refined consensus translation",
+            "warning",
+        ));
+    }
+    (chains, warnings)
+}
+
 /// Jointly rescore the alignment-derived boundary hypotheses.
 ///
 /// `total = alignment score + 0.12 terminal support + 0.08 TSD support
@@ -2590,12 +3599,18 @@ fn assess_host_domains(
     rules: &DomainRuleSet,
     consensus_length: usize,
     structural: &[StructuralEvidence],
+    metadata: &HashMap<String, CopyMetadata>,
+    boundary: &BoundaryResult,
 ) -> (HostDomainAssessment, Vec<CurationWarning>) {
     let mut te_hits = 0usize;
     let mut host_hits = 0usize;
+    let mut ubiquitous_hits = 0usize;
+    let mut unknown_rule_hits = 0usize;
     let mut unclassified = 0usize;
     let mut host_intervals = Vec::new();
     let mut selected_host_ids = HashSet::new();
+    let mut independent_host_loci = HashSet::new();
+    let mut host_model_loci: BTreeMap<String, HashSet<String>> = BTreeMap::new();
     let mut consensus_host = false;
     for hit in hits {
         let text = format!("{} {} {}", hit.domain_name, hit.accession, hit.description)
@@ -2609,8 +3624,18 @@ fn assess_host_domains(
                     .any(|pattern| text.contains(&pattern.to_ascii_lowercase()))
             })
             .collect();
-        let te = matched.iter().any(|rule| rule.te_associated);
-        let host = matched.iter().any(|rule| !rule.te_associated);
+        let te = matched
+            .iter()
+            .any(|rule| domain_rule_association(rule) == DomainAssociation::TeAssociated);
+        let host = matched
+            .iter()
+            .any(|rule| domain_rule_association(rule) == DomainAssociation::HostEnriched);
+        let ubiquitous = matched
+            .iter()
+            .any(|rule| domain_rule_association(rule) == DomainAssociation::Ubiquitous);
+        let unknown = matched
+            .iter()
+            .any(|rule| domain_rule_association(rule) == DomainAssociation::Unknown);
         if te {
             te_hits += 1;
         }
@@ -2623,9 +3648,21 @@ fn assess_host_domains(
                 }
             } else if hit.source_type == "selected_copy" {
                 selected_host_ids.insert(hit.sequence_id.clone());
+                let locus = independent_copy_key(&hit.sequence_id, metadata);
+                independent_host_loci.insert(locus.clone());
+                host_model_loci
+                    .entry(domain_chain_key(hit))
+                    .or_default()
+                    .insert(locus);
             }
         }
-        if !te && !host {
+        if ubiquitous {
+            ubiquitous_hits += 1;
+        }
+        if unknown {
+            unknown_rule_hits += 1;
+        }
+        if matched.is_empty() {
             unclassified += 1;
         }
     }
@@ -2646,24 +3683,44 @@ fn assess_host_domains(
         covered += end.saturating_sub(start);
     }
     let host_fraction = covered as f64 / consensus_length.max(1) as f64;
-    let strong_structure = structural
+    let terminal_structure_counterevidence = structural
         .first()
-        .is_some_and(|hit| hit.identity >= 0.80 && hit.candidate_length >= 8);
-    let hit_fraction = host_hits as f64 / hits.len().max(1) as f64;
-    let evidence_score = (0.50 * host_fraction
-        + 0.30 * hit_fraction
-        + if te_hits == 0 && host_hits > 0 {
-            0.20
-        } else {
-            0.0
+        .map_or(0.0, |hit| {
+            hit.identity * (hit.candidate_length as f64 / 20.0).min(1.0)
         })
-    .clamp(0.0, 1.0);
+        .clamp(0.0, 1.0);
+    let hit_fraction = host_hits as f64 / hits.len().max(1) as f64;
+    let locus_support = (independent_host_loci.len() as f64 / 3.0).min(1.0);
+    let boundary_uncertainty =
+        (1.0 - (boundary.left_confidence + boundary.right_confidence) / 2.0).clamp(0.0, 1.0);
+    let no_te_support = f64::from(te_hits == 0);
+    let evidence_score = if host_hits == 0 {
+        0.0
+    } else {
+        (0.30 * host_fraction
+            + 0.20 * hit_fraction
+            + 0.20 * locus_support
+            + 0.10 * boundary_uncertainty
+            + 0.10 * (1.0 - terminal_structure_counterevidence)
+            + 0.10 * no_te_support)
+            .clamp(0.0, 1.0)
+    };
+    let recurrent_host_models: Vec<_> = host_model_loci
+        .iter()
+        .filter(|(_, loci)| loci.len() >= 2)
+        .map(|(model, _)| model.clone())
+        .collect();
     let assessment = if host_hits == 0 {
         "no_host_domain_signal"
     } else if te_hits > 0 {
         "mixed_te_and_host_domains"
-    } else if host_fraction >= 0.50 && !strong_structure {
+    } else if evidence_score >= 0.65
+        && (host_fraction >= 0.50 || independent_host_loci.len() >= 2)
+        && terminal_structure_counterevidence < 0.70
+    {
         "strong_host_like_domain_signal"
+    } else if !recurrent_host_models.is_empty() {
+        "recurrent_host_like_domain_signal"
     } else {
         "review_host_like_domain_signal"
     };
@@ -2683,19 +3740,44 @@ fn assess_host_domains(
             "warning",
         ));
     }
+    if assessment == "recurrent_host_like_domain_signal" {
+        warnings.push(CurationWarning::new(
+            "recurrent_host_domain_signal",
+            "Host-enriched domain evidence recurs at two or more independent selected-copy loci",
+            "warning",
+        ));
+    }
     if !selected_host_ids.is_empty() && !consensus_host {
         warnings.push(CurationWarning::new("host_domain_copy_specific", "Host-associated domains occur only in selected genomic copies and may be locus-specific contamination or nesting", "warning"));
     }
     let mut selected_only: Vec<_> = selected_host_ids.into_iter().collect();
     selected_only.sort();
+    let mut evidence_components = BTreeMap::new();
+    evidence_components.insert("consensus_host_coverage".into(), host_fraction);
+    evidence_components.insert("host_hit_fraction".into(), hit_fraction);
+    evidence_components.insert("independent_locus_support".into(), locus_support);
+    evidence_components.insert("boundary_uncertainty".into(), boundary_uncertainty);
+    evidence_components.insert(
+        "absence_of_terminal_counterevidence".into(),
+        1.0 - terminal_structure_counterevidence,
+    );
+    evidence_components.insert("absence_of_te_domain_support".into(), no_te_support);
     (
         HostDomainAssessment {
             assessment: assessment.into(),
             te_associated_hits: te_hits,
             host_like_hits: host_hits,
+            host_enriched_hits: host_hits,
+            ubiquitous_hits,
+            unknown_rule_hits,
             unclassified_hits: unclassified,
             host_domain_fraction_of_consensus: host_fraction,
             host_hits_on_selected_copies_only: selected_only,
+            independent_host_loci: independent_host_loci.len(),
+            recurrent_host_models,
+            boundary_uncertainty,
+            terminal_structure_counterevidence,
+            evidence_components,
             evidence_score,
         },
         warnings,
@@ -3058,20 +4140,74 @@ fn tier_for_score(score: f64, usable: usize) -> ConfidenceTier {
     }
 }
 
-fn boundary_jackknife_stability(
+fn boundary_interval(values: &[usize]) -> Option<BoundaryInterval> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let at = |fraction: f64| {
+        let index = ((sorted.len() - 1) as f64 * fraction).round() as usize;
+        sorted[index]
+    };
+    Some(BoundaryInterval {
+        minimum: sorted[0],
+        lower_decile: at(0.10),
+        median: at(0.50),
+        upper_decile: at(0.90),
+        maximum: sorted[sorted.len() - 1],
+    })
+}
+
+fn boundary_stability(values: &[usize], expected: usize, tolerance: usize) -> Option<f64> {
+    (!values.is_empty()).then(|| {
+        values
+            .iter()
+            .filter(|value| value.abs_diff(expected) <= tolerance)
+            .count() as f64
+            / values.len() as f64
+    })
+}
+
+fn infer_sample_boundary(
+    records: Vec<AlignedCopy>,
+    config: &BoundaryConfig,
+) -> Option<BoundaryResult> {
+    let sample = Alignment::from_records(records, 2).ok()?;
+    let sample_stats = column_statistics(&sample);
+    let mut sample_config = config.clone();
+    sample_config.minimum_copies = sample_config.minimum_copies.min(sample.len());
+    infer_boundaries(&sample_stats, &sample_config, sample.len()).ok()
+}
+
+fn boundary_robustness(
     alignment: &Alignment,
     config: &BoundaryConfig,
     final_boundary: &BoundaryResult,
-) -> (usize, Option<f64>, Option<f64>) {
+) -> BoundaryRobustness {
+    let tolerance = config.smoothing_window.saturating_mul(2).max(2);
     if alignment.len() <= 2 {
-        return (0, None, None);
+        return BoundaryRobustness {
+            tolerance_columns: tolerance,
+            jackknife_replicates: 0,
+            bootstrap_replicates: 0,
+            parameter_replicates: 0,
+            jackknife_left_stability: None,
+            jackknife_right_stability: None,
+            bootstrap_left_stability: None,
+            bootstrap_right_stability: None,
+            parameter_left_stability: None,
+            parameter_right_stability: None,
+            left_interval: None,
+            right_interval: None,
+            influential_copies: Vec::new(),
+        };
     }
     let step = (alignment.len() / 20).max(1);
     let indices: Vec<_> = (0..alignment.len()).step_by(step).take(20).collect();
-    let tolerance = config.smoothing_window.saturating_mul(2).max(2);
-    let mut left_stable = 0usize;
-    let mut right_stable = 0usize;
-    let mut completed = 0usize;
+    let mut jackknife_left = Vec::new();
+    let mut jackknife_right = Vec::new();
+    let mut influential_copies = Vec::new();
     for omitted in indices {
         let records: Vec<_> = alignment
             .copies()
@@ -3080,30 +4216,130 @@ fn boundary_jackknife_stability(
             .filter(|(index, _)| *index != omitted)
             .map(|(_, copy)| copy.clone())
             .collect();
-        let Ok(sample) = Alignment::from_records(records, 2) else {
-            continue;
-        };
-        let sample_stats = column_statistics(&sample);
-        let mut sample_config = config.clone();
-        sample_config.minimum_copies = sample_config.minimum_copies.min(sample.len());
-        if let Ok(result) = infer_boundaries(&sample_stats, &sample_config, sample.len()) {
-            completed += 1;
-            if result.left.abs_diff(final_boundary.left) <= tolerance {
-                left_stable += 1;
-            }
-            if result.right.abs_diff(final_boundary.right) <= tolerance {
-                right_stable += 1;
+        if let Some(result) = infer_sample_boundary(records, config) {
+            jackknife_left.push(result.left);
+            jackknife_right.push(result.right);
+            let maximum_absolute_shift = result
+                .left
+                .abs_diff(final_boundary.left)
+                .max(result.right.abs_diff(final_boundary.right));
+            if maximum_absolute_shift > tolerance {
+                influential_copies.push(CopyBoundaryInfluence {
+                    copy_id: alignment.copies()[omitted].id.clone(),
+                    left_shift: result.left as i64 - final_boundary.left as i64,
+                    right_shift: result.right as i64 - final_boundary.right as i64,
+                    maximum_absolute_shift,
+                });
             }
         }
     }
-    if completed == 0 {
-        (0, None, None)
-    } else {
-        (
-            completed,
-            Some(left_stable as f64 / completed as f64),
-            Some(right_stable as f64 / completed as f64),
-        )
+    influential_copies.sort_by(|a, b| {
+        b.maximum_absolute_shift
+            .cmp(&a.maximum_absolute_shift)
+            .then_with(|| a.copy_id.cmp(&b.copy_id))
+    });
+
+    let mut bootstrap_left = Vec::new();
+    let mut bootstrap_right = Vec::new();
+    for replicate in 0..20usize {
+        let mut state = (replicate as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        let records = (0..alignment.len())
+            .map(|draw| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let index = (state as usize) % alignment.len();
+                let mut copy = alignment.copies()[index].clone();
+                copy.id = format!("{}#bootstrap-{replicate}-{draw}", copy.id);
+                copy
+            })
+            .collect();
+        if let Some(result) = infer_sample_boundary(records, config) {
+            bootstrap_left.push(result.left);
+            bootstrap_right.push(result.right);
+        }
+    }
+
+    let window_values = [
+        (config.smoothing_window / 2).max(1),
+        config.smoothing_window,
+        config.smoothing_window.saturating_mul(3).div_ceil(2),
+    ];
+    let occupancy_values = [
+        (config.minimum_occupancy - 0.10).max(0.05),
+        config.minimum_occupancy,
+        (config.minimum_occupancy + 0.10).min(0.95),
+    ];
+    let length_values = [
+        (config.minimum_body_length.saturating_mul(4) / 5).max(1),
+        config.minimum_body_length,
+        config.minimum_body_length.saturating_mul(6).div_ceil(5),
+    ];
+    let mut parameter_left = Vec::new();
+    let mut parameter_right = Vec::new();
+    let stats = column_statistics(alignment);
+    for smoothing_window in window_values {
+        for minimum_occupancy in occupancy_values {
+            for minimum_body_length in length_values {
+                let perturbed = BoundaryConfig {
+                    smoothing_window,
+                    minimum_body_length: minimum_body_length.min(alignment.width()),
+                    minimum_occupancy,
+                    minimum_copies: config.minimum_copies,
+                    extension: config.extension,
+                };
+                if let Ok(result) = infer_boundaries(&stats, &perturbed, alignment.len()) {
+                    parameter_left.push(result.left);
+                    parameter_right.push(result.right);
+                }
+            }
+        }
+    }
+
+    let mut all_left = jackknife_left.clone();
+    all_left.extend(&bootstrap_left);
+    all_left.extend(&parameter_left);
+    let mut all_right = jackknife_right.clone();
+    all_right.extend(&bootstrap_right);
+    all_right.extend(&parameter_right);
+    BoundaryRobustness {
+        tolerance_columns: tolerance,
+        jackknife_replicates: jackknife_left.len(),
+        bootstrap_replicates: bootstrap_left.len(),
+        parameter_replicates: parameter_left.len(),
+        jackknife_left_stability: boundary_stability(
+            &jackknife_left,
+            final_boundary.left,
+            tolerance,
+        ),
+        jackknife_right_stability: boundary_stability(
+            &jackknife_right,
+            final_boundary.right,
+            tolerance,
+        ),
+        bootstrap_left_stability: boundary_stability(
+            &bootstrap_left,
+            final_boundary.left,
+            tolerance,
+        ),
+        bootstrap_right_stability: boundary_stability(
+            &bootstrap_right,
+            final_boundary.right,
+            tolerance,
+        ),
+        parameter_left_stability: boundary_stability(
+            &parameter_left,
+            final_boundary.left,
+            tolerance,
+        ),
+        parameter_right_stability: boundary_stability(
+            &parameter_right,
+            final_boundary.right,
+            tolerance,
+        ),
+        left_interval: boundary_interval(&all_left),
+        right_interval: boundary_interval(&all_right),
+        influential_copies,
     }
 }
 
@@ -3116,6 +4352,9 @@ fn load_confidence_calibration(
     if calibration.schema_version != "reputils.confidence-calibration.v1"
         || calibration.source.trim().is_empty()
         || calibration.bins.is_empty()
+        || calibration.labels_sha256.as_ref().is_some_and(|value| {
+            value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
     {
         return Err(CurationError::InvalidParameter(
             "confidence calibration needs the supported schema, source, and at least one bin"
@@ -3127,6 +4366,18 @@ fn load_confidence_calibration(
         .sort_by(|a, b| a.minimum_score.total_cmp(&b.minimum_score));
     let mut previous_end = 0.0;
     for bin in &calibration.bins {
+        let interval_valid = match (bin.wilson_lower_95, bin.wilson_upper_95) {
+            (None, None) => true,
+            (Some(lower), Some(upper)) => {
+                lower.is_finite()
+                    && upper.is_finite()
+                    && (0.0..=1.0).contains(&lower)
+                    && (0.0..=1.0).contains(&upper)
+                    && lower <= bin.estimated_probability_correct
+                    && bin.estimated_probability_correct <= upper
+            }
+            _ => false,
+        };
         if !bin.minimum_score.is_finite()
             || !bin.maximum_score.is_finite()
             || bin.minimum_score < 0.0
@@ -3134,6 +4385,10 @@ fn load_confidence_calibration(
             || bin.minimum_score >= bin.maximum_score
             || !(0.0..=1.0).contains(&bin.estimated_probability_correct)
             || bin.sample_size == 0
+            || bin
+                .correct_count
+                .is_some_and(|count| count > bin.sample_size)
+            || !interval_valid
             || bin.minimum_score < previous_end
         {
             return Err(CurationError::InvalidParameter(
@@ -3180,8 +4435,7 @@ fn confidence_assessment(evidence: ConfidenceEvidence<'_>) -> ConfidenceAssessme
         domains,
         domain_hints,
     );
-    let (replicates, left_stability, right_stability) =
-        boundary_jackknife_stability(alignment, config, boundary);
+    let robustness = boundary_robustness(alignment, config, boundary);
     let matched_bin = calibration.and_then(|table| {
         table.bins.iter().find(|bin| {
             score >= bin.minimum_score
@@ -3194,19 +4448,20 @@ fn confidence_assessment(evidence: ConfidenceEvidence<'_>) -> ConfidenceAssessme
         tier: tier_for_score(tier_score, usable),
         heuristic_score: score,
         factor_scores: factors,
-        jackknife_replicates: replicates,
-        left_boundary_stability: left_stability,
-        right_boundary_stability: right_stability,
+        jackknife_replicates: robustness.jackknife_replicates,
+        left_boundary_stability: robustness.jackknife_left_stability,
+        right_boundary_stability: robustness.jackknife_right_stability,
         calibrated_probability,
         calibration_sample_size: matched_bin.map(|bin| bin.sample_size),
         calibration_source: calibration.map(|table| table.source.clone()),
         calibration_status: if calibration.is_none() {
-            "heuristic-with-internal-jackknife; not statistically calibrated".into()
+            "heuristic-with-internal-sensitivity-analysis; not statistically calibrated".into()
         } else if matched_bin.is_some() {
             "externally-calibrated-from-labeled-bin".into()
         } else {
             "calibration-table-supplied-but-no-bin-matched".into()
         },
+        boundary_robustness: robustness,
     }
 }
 fn create(path: &Path) -> Result<File, CurationError> {
@@ -3244,7 +4499,7 @@ fn write_subfamily_outputs(
                 ">{}\n{}",
                 copy.id,
                 String::from_utf8_lossy(
-                    &copy.sequence[result.boundary_result.left..result.boundary_result.right]
+                    &copy.sequence[split.boundary_result.left..split.boundary_result.right]
                 )
             )
             .map_err(|error| io_error(alignment_path, error))?;
@@ -3282,6 +4537,7 @@ fn write_outputs(
         &r.tsd_evidence,
     )?;
     write_domains(&out.join("domains.tsv"), &r.domain_evidence)?;
+    write_domain_chains(&out.join("domain-chains.tsv"), &r.domain_fragment_chains)?;
     write_warnings(&out.join("warnings.tsv"), &r.warnings)?;
     let jf = create(&out.join("result.json"))?;
     serde_json::to_writer_pretty(jf, r)?;
@@ -3394,6 +4650,39 @@ fn write_domains(p: &Path, v: &[DomainHit]) -> Result<(), CurationError> {
     }
     Ok(())
 }
+fn write_domain_chains(p: &Path, chains: &[DomainFragmentChain]) -> Result<(), CurationError> {
+    let mut file = create(p)?;
+    writeln!(file, "chain_id	sequence_id	source_type	domain_name	accession	strand	frames	fragment_count	nucleotide_start	nucleotide_end	combined_coverage	combined_bitscore	maximum_nucleotide_gap	supporting_copy_ids	independent_copy_support	recurrent_across_copies").map_err(|error| io_error(p, error))?;
+    for chain in chains {
+        writeln!(
+            file,
+            "{}	{}	{}	{}	{}	{}	{}	{}	{}	{}	{:.6}	{:.3}	{}	{}	{}	{}",
+            chain.chain_id,
+            chain.sequence_id,
+            chain.source_type,
+            chain.domain_name,
+            chain.accession,
+            chain.strand,
+            chain
+                .frames
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            chain.fragment_count,
+            chain.nucleotide_start + 1,
+            chain.nucleotide_end,
+            chain.combined_coverage,
+            chain.combined_bitscore,
+            chain.maximum_nucleotide_gap,
+            chain.supporting_copy_ids.join(","),
+            chain.independent_copy_support,
+            chain.recurrent_across_copies
+        )
+        .map_err(|error| io_error(p, error))?;
+    }
+    Ok(())
+}
 fn write_warnings(p: &Path, v: &[CurationWarning]) -> Result<(), CurationError> {
     let mut f = create(p)?;
     writeln!(f, "code\tseverity\tmessage").map_err(|e| io_error(p, e))?;
@@ -3480,7 +4769,7 @@ fn render_report(r: &CurationResult, a: &Alignment, stats: &[AlignmentColumnStat
         copies,
         alignment,
         esc(&serde_json::to_string_pretty(&serde_json::json!({"terminal_repeats": r.structural_evidence, "coordinate_tsds": r.tsd_evidence, "tsd_support_by_length": r.tsd_support_by_length})).unwrap_or_default()),
-        esc(&serde_json::to_string_pretty(&serde_json::json!({"hits": r.domain_evidence, "matched_rules": r.domain_rule_matches, "host_assessment": r.host_domain_assessment})).unwrap_or_default()),
+        esc(&serde_json::to_string_pretty(&serde_json::json!({"hits": r.domain_evidence, "cross_frame_chains": r.domain_fragment_chains, "matched_rules": r.domain_rule_matches, "host_assessment": r.host_domain_assessment})).unwrap_or_default()),
         esc(&serde_json::to_string_pretty(&serde_json::json!({"evidence": r.subfamily_evidence, "emitted_consensuses": r.subfamily_consensuses})).unwrap_or_default()),
         esc(&serde_json::to_string_pretty(&r.locus_diagnostics).unwrap_or_default()),
         warnings,
@@ -3813,6 +5102,8 @@ printf 'RT PF00001.1 100 target0|strand=+|frame=1 - 3 1e-20 50.0 0.0 1 1 1e-10 1
             confidence_calibration: None,
             scan_selected_copies: false,
             split_subfamilies: false,
+            minimum_subfamily_copies: 3,
+            minimum_split_support: 0.50,
             max_copy_domain_targets: 10,
             min_copies: 1,
             force: true,
@@ -3867,6 +5158,7 @@ printf 'RT PF00001.1 100 target0|strand=+|frame=1 - 3 1e-20 50.0 0.0 1 1 1e-10 1
                 id: "custom-kinase".into(),
                 patterns: vec!["kinase".into()],
                 te_associated: false,
+                association: Some(DomainAssociation::HostEnriched),
                 architecture_hint: None,
                 warning_code: Some("custom_domain_warning".into()),
                 warning_message: Some("Configured host-like domain".into()),
@@ -3922,6 +5214,8 @@ printf 'RT PF00001.1 100 target0|strand=+|frame=1 - 3 1e-20 50.0 0.0 1 1 1e-10 1
             confidence_calibration: None,
             scan_selected_copies: true,
             split_subfamilies: false,
+            minimum_subfamily_copies: 3,
+            minimum_split_support: 0.50,
             max_copy_domain_targets: 2,
             min_copies: 1,
             force: false,
@@ -4082,6 +5376,8 @@ printf '>target0_1 [1 - 9]\nMK\n>target0_2 [9 - 1]\nMK\n' > "$out"
             confidence_calibration: None,
             scan_selected_copies: false,
             split_subfamilies: false,
+            minimum_subfamily_copies: 3,
+            minimum_split_support: 0.50,
             max_copy_domain_targets: 10,
             min_copies: 1,
             force: true,
@@ -4170,10 +5466,17 @@ printf '>target0_1 [1 - 9]\nMK\n>target0_2 [9 - 1]\nMK\n' > "$out"
             &boundary,
             &evidence,
             3,
+            0.50,
             Path::new("out"),
         );
+        assert!(evidence.robust_split_supported);
+        assert!(evidence.method_agreement >= 0.90);
+        assert!(evidence.threshold_stability >= 0.80);
         assert_eq!(splits.len(), 2);
         assert!(splits.iter().all(|split| split.members.len() == 3));
+        assert!(splits
+            .iter()
+            .all(|split| split.boundary_result.right > split.boundary_result.left));
     }
 
     #[test]
@@ -4204,6 +5507,8 @@ printf '>target0_1 [1 - 9]\nMK\n>target0_2 [9 - 1]\nMK\n' > "$out"
             confidence_calibration: None,
             scan_selected_copies: false,
             split_subfamilies: true,
+            minimum_subfamily_copies: 3,
+            minimum_split_support: 0.50,
             max_copy_domain_targets: 10,
             min_copies: 3,
             force: false,
@@ -4263,7 +5568,180 @@ printf '>target0_1 [1 - 9]\nMK\n>target0_2 [9 - 1]\nMK\n' > "$out"
         assert_eq!(assessment.calibration_sample_size, Some(100));
         assert!(matches!(assessment.tier, ConfidenceTier::High));
         assert_eq!(assessment.jackknife_replicates, 3);
+        assert_eq!(assessment.boundary_robustness.bootstrap_replicates, 20);
+        assert_eq!(assessment.boundary_robustness.parameter_replicates, 27);
+        assert!(assessment.boundary_robustness.left_interval.is_some());
+        assert!(assessment.boundary_robustness.right_interval.is_some());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cross_frame_domain_chains_require_compatible_fragments_and_recur_across_loci() {
+        let fragment = |sequence_id: &str,
+                        source_type: &str,
+                        frame: i8,
+                        nucleotide_start: usize,
+                        nucleotide_end: usize| DomainHit {
+            sequence_id: sequence_id.into(),
+            source_type: source_type.into(),
+            domain_name: "reverse_transcriptase".into(),
+            accession: "PF07727".into(),
+            description: "partial reverse transcriptase".into(),
+            evalue: 1e-10,
+            conditional_evalue: 1e-10,
+            bitscore: 30.0,
+            bias: 0.0,
+            aa_start: 1,
+            aa_end: 20,
+            nucleotide_start: Some(nucleotide_start),
+            nucleotide_end: Some(nucleotide_end),
+            strand: Some("+".into()),
+            frame: Some(frame),
+            coverage: 0.35,
+            partial: true,
+        };
+        let mut hits = Vec::new();
+        for (id, source) in [
+            ("refined_consensus", "refined_consensus"),
+            ("copy1", "selected_copy"),
+            ("copy2", "selected_copy"),
+        ] {
+            hits.push(fragment(id, source, 1, 10, 70));
+            hits.push(fragment(id, source, 2, 80, 140));
+        }
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "copy1".into(),
+            CopyMetadata {
+                locus_id: Some("locus-1".into()),
+                ..CopyMetadata::default()
+            },
+        );
+        metadata.insert(
+            "copy2".into(),
+            CopyMetadata {
+                locus_id: Some("locus-2".into()),
+                ..CopyMetadata::default()
+            },
+        );
+        let (chains, warnings) = chain_domain_fragments(&hits, &metadata);
+        assert_eq!(chains.len(), 3);
+        assert!(chains
+            .iter()
+            .all(|chain| chain.frames == vec![1, 2] && chain.recurrent_across_copies));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.code == "recurrent_frameshifted_domain"));
+
+        let incompatible = vec![
+            fragment("consensus", "refined_consensus", 1, 10, 70),
+            fragment("consensus", "refined_consensus", 2, 400, 460),
+        ];
+        assert!(chain_domain_fragments(&incompatible, &HashMap::new())
+            .0
+            .is_empty());
+    }
+
+    #[test]
+    fn benchmark_evaluates_intervals_and_emits_provenanced_calibration() {
+        let base = std::env::temp_dir().join(format!("reputils-benchmark-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        fs::write(
+            base.join("correct.json"),
+            r#"{"schema_version":"reputils.curation.v1","boundary_result":{"left":9,"right":100},"confidence_assessment":{"heuristic_score":0.8},"architecture_hints":["tir-like"],"warnings":[{"code":"mixed"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            base.join("incorrect.json"),
+            r#"{"schema_version":"reputils.curation.v1","boundary_result":{"left":30,"right":150},"confidence_assessment":{"heuristic_score":0.2},"architecture_hints":["unknown"],"warnings":[{"code":"unexpected"}]}"#,
+        )
+        .unwrap();
+        let labels_path = base.join("labels.json");
+        fs::write(
+            &labels_path,
+            r#"{"schema_version":"reputils.curation-benchmark.v1","source":"two independently curated fixtures","families":[{"family_id":"correct","result_json":"correct.json","accepted_left":{"minimum_1based":8,"maximum_1based":12},"accepted_right":{"minimum_1based":98,"maximum_1based":102},"accepted_architectures":["tir-like"],"warning_labels":{"mixed":true}},{"family_id":"incorrect","result_json":"incorrect.json","accepted_left":{"minimum_1based":8,"maximum_1based":12},"accepted_right":{"minimum_1based":98,"maximum_1based":102},"accepted_architectures":["tir-like"],"warning_labels":{"unexpected":false}}]}"#,
+        )
+        .unwrap();
+        let out = base.join("out");
+        let result = run_benchmark(&BenchmarkOptions {
+            labels: labels_path,
+            out: out.clone(),
+            bins: 2,
+            minimum_bin_size: 1,
+            force: false,
+        })
+        .unwrap();
+        assert_eq!(result.summary.assessed_families, 2);
+        assert_eq!(result.summary.boundary_pair_accuracy, 0.5);
+        assert_eq!(result.summary.warning_precision, Some(0.5));
+        assert_eq!(result.summary.warning_recall, Some(1.0));
+        let calibration = result.calibration.unwrap();
+        assert_eq!(calibration.bins.len(), 2);
+        assert!(calibration.labels_sha256.is_some());
+        assert!(calibration.bins.iter().all(|bin| {
+            bin.wilson_lower_95.is_some()
+                && bin.wilson_upper_95.is_some()
+                && bin.correct_count.is_some()
+        }));
+        assert!(out.join("benchmark.json").is_file());
+        assert!(out.join("families.tsv").is_file());
+        assert!(out.join("calibration.json").is_file());
+        assert!(
+            load_confidence_calibration(Some(&out.join("calibration.json")))
+                .unwrap()
+                .is_some()
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn ubiquitous_domain_rules_do_not_create_host_signal() {
+        let rules = DomainRuleSet {
+            rules: vec![DomainRule {
+                id: "ubiquitous".into(),
+                patterns: vec!["helicase".into()],
+                te_associated: false,
+                association: Some(DomainAssociation::Ubiquitous),
+                architecture_hint: None,
+                warning_code: None,
+                warning_message: None,
+            }],
+        };
+        let hit = DomainHit {
+            sequence_id: "refined_consensus".into(),
+            source_type: "refined_consensus".into(),
+            domain_name: "generic helicase".into(),
+            accession: "PF00000".into(),
+            description: String::new(),
+            evalue: 1e-20,
+            conditional_evalue: 1e-20,
+            bitscore: 50.0,
+            bias: 0.0,
+            aa_start: 1,
+            aa_end: 20,
+            nucleotide_start: Some(0),
+            nucleotide_end: Some(60),
+            strand: Some("+".into()),
+            frame: Some(1),
+            coverage: 0.9,
+            partial: false,
+        };
+        let boundary = BoundaryResult {
+            left: 0,
+            right: 100,
+            left_confidence: 0.8,
+            right_confidence: 0.8,
+            architecture_hint: None,
+            alternatives: Vec::new(),
+            winning_score: empty_components(1.0),
+            warnings: Vec::new(),
+        };
+        let (assessment, warnings) =
+            assess_host_domains(&[hit], &rules, 100, &[], &HashMap::new(), &boundary);
+        assert_eq!(assessment.assessment, "no_host_domain_signal");
+        assert_eq!(assessment.ubiquitous_hits, 1);
+        assert_eq!(assessment.host_enriched_hits, 0);
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -4273,6 +5751,7 @@ printf '>target0_1 [1 - 9]\nMK\n>target0_2 [9 - 1]\nMK\n' > "$out"
                 id: "host".into(),
                 patterns: vec!["kinase".into()],
                 te_associated: false,
+                association: Some(DomainAssociation::HostEnriched),
                 architecture_hint: None,
                 warning_code: None,
                 warning_message: None,
@@ -4297,7 +5776,18 @@ printf '>target0_1 [1 - 9]\nMK\n>target0_2 [9 - 1]\nMK\n' > "$out"
             coverage: 0.9,
             partial: false,
         };
-        let (assessment, warnings) = assess_host_domains(&[hit], &rules, 100, &[]);
+        let boundary = BoundaryResult {
+            left: 0,
+            right: 100,
+            left_confidence: 0.2,
+            right_confidence: 0.2,
+            architecture_hint: None,
+            alternatives: Vec::new(),
+            winning_score: empty_components(1.0),
+            warnings: Vec::new(),
+        };
+        let (assessment, warnings) =
+            assess_host_domains(&[hit], &rules, 100, &[], &HashMap::new(), &boundary);
         assert_eq!(assessment.assessment, "strong_host_like_domain_signal");
         assert!(assessment.host_domain_fraction_of_consensus >= 0.9);
         assert!(warnings
