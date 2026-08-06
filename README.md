@@ -50,12 +50,14 @@ Options:
 - `--coordinates`: a tab-separated table whose header includes `copy_id`; recognised metadata columns are listed below. Values override matching manifest rows.
 - `--query`: provisional consensus FASTA used for per-copy identity.
 - `--genome`: source genome FASTA. With `subject_id`, `unextended_start`, and `unextended_end`, immediately adjacent flanks are tested for TSDs. Coordinates are interpreted as zero-based, half-open.
-- `--hmm-db` or `--repeatpeps`: a local HMM database searched against built-in six-frame translations of the refined consensus.
+- `--hmm-db` or `--repeatpeps`: a local HMM database searched against protein targets derived from the refined consensus.
 - `--hmmscan`, `--hmmsearch`: executable paths. `REPUTILS_HMMSCAN` and `REPUTILS_HMMSEARCH` are also recognised. `hmmscan` is preferred; `hmmsearch` is used when no hmmscan path/environment override is supplied.
 - `--domain-rules`: optional JSON rule table; see `examples/domain-rules.json`. Each rule has an ID, case-insensitive patterns, TE association, optional architecture hint, and optional warning.
 - `--scan-selected-copies` and `--max-copy-domain-targets`: opt in to HMM searches of a deterministic, bounded selected-copy subset in addition to the refined consensus.
 - `--boundary-override`: apply a validated `reputils.curation-override.v1` file exported by the HTML report. Explicit curator boundaries are preserved and not automatically reranked.
-- `--getorf`: reserved for a later ORF-target mode. Supplying it currently returns an explicit error; omit it to use built-in six-frame translation.
+- `--getorf`: optional EMBOSS `getorf` executable path; `REPUTILS_GETORF` is also recognised. When configured, ORFs from the refined consensus (and the bounded selected-copy targets, if requested) replace built-in six-frame translations. The invoked command and version are recorded. Without it, the deterministic six-frame fallback remains available.
+- `--split-subfamilies`: conservatively emit cluster-specific alignments and consensuses under `subfamilies/`. Output is produced only when at least two clusters have strong separation and at least three copies each; otherwise the one-family result is retained and a warning explains that splitting was unsupported.
+- `--confidence-calibration`: optional labeled `reputils.confidence-calibration.v1` JSON table. A probability is reported only when the heuristic score falls in a validated bin derived from an externally labeled data set.
 - `--threads`, `--min-copies`, `--force`: external-tool threads, validation minimum, and permission to overwrite known output files in an existing directory.
 
 The command never silently discards a copy. Every copy appears in `copies.tsv` and `result.json` with selection state and exclusion reason.
@@ -130,7 +132,7 @@ Coordinate-aware TSD analysis compares only the immediately adjacent left and ri
 
 ### Subfamilies
 
-Distances use mutually called overlapping sites and a minimum overlap. A deterministic single-link clustering diagnostic reports candidate clusters, membership, within/between distances, insufficient comparisons, and split support. It warns about possible mixed subfamilies but does not automatically emit multiple consensuses.
+Distances use mutually called overlapping sites and a minimum overlap. A deterministic single-link clustering diagnostic reports candidate clusters, membership, within/between distances, insufficient comparisons, and split support. By default it only warns about possible mixed subfamilies. With `--split-subfamilies`, additional outputs are emitted only when split support is at least 0.50, between-cluster distance exceeds within-cluster distance by at least 0.05, and every cluster contains at least three copies. The primary family consensus is always retained.
 
 ### Locus and host-flank diagnostics
 
@@ -138,9 +140,9 @@ When coordinates are available, substantially overlapping source intervals and d
 
 ### Protein domains
 
-`reputils` does not implement profile-HMM search. It produces six-frame translations and executes HMMER, parses domain-table output, maps amino-acid hits back to zero-based half-open nucleotide coordinates on both strands, and retains partial hits. Executed commands and tool versions are recorded.
+`reputils` does not implement profile-HMM search. It either produces six-frame translations or invokes configured EMBOSS `getorf`, then executes HMMER, parses domain-table output, maps amino-acid hits back to zero-based half-open nucleotide coordinates on both strands, and retains partial hits. A successful `getorf` run that finds no ORFs yields an empty domain result rather than failing curation. Executed commands and tool versions are recorded.
 
-Domain names, accessions, and descriptions are interpreted with a validated JSON-configurable rule table (or the extensible internal defaults) covering reverse transcriptase, RNase H, integrase, retroviral protease/gag, endonuclease, DDE/transposase, rolling-circle Rep, helicase, tyrosine recombinase, and protein-primed polymerase concepts. These yield hints and warnings, not automatic rejection. Domains on both strands, partial domains, and ordinary host-like domains are flagged conservatively.
+Domain names, accessions, and descriptions are interpreted with a validated JSON-configurable rule table (or the extensible internal defaults) covering reverse transcriptase, RNase H, integrase, retroviral protease/gag, endonuclease, DDE/transposase, rolling-circle Rep, helicase, tyrosine recombinase, and protein-primed polymerase concepts. These yield hints and warnings, not automatic rejection. Domains on both strands, partial domains, and ordinary host-like domains are flagged conservatively. The machine-readable host-domain assessment distinguishes absent, mixed TE/host, review-level host-like, and strong host-like signals and records the supporting counts and consensus coverage.
 
 Supply databases yourself. Compatible sources may include Dfam profile HMMs, RepeatPeps-related local resources, and curated Pfam-derived TE models. Check each source's licence and conversion/indexing requirements; the repository does not redistribute or download third-party databases and does not claim that every source is freely redistributable.
 
@@ -160,6 +162,16 @@ curated-family/
 └── report.html
 ```
 
+When a requested subfamily split passes the conservative checks, the directory additionally contains:
+
+```text
+curated-family/subfamilies/
+├── cluster-1.consensus.fa
+├── cluster-1.alignment.fa
+├── cluster-2.consensus.fa
+└── cluster-2.alignment.fa
+```
+
 `result.json` uses `schema_version: "reputils.curation.v1"`. Its top-level fields are:
 
 - `schema_version`, `reputils_version`;
@@ -169,7 +181,8 @@ curated-family/
 - winning and alternative boundaries with component scores;
 - refined consensus and per-position confidence/profile;
 - terminal-repeat, TSD, TSD-by-length, domain, and subfamily evidence;
-- architecture hints, warnings, and overall confidence tier;
+- architecture hints, warnings, overall confidence tier, factor scores, and jackknife boundary stability;
+- optional emitted subfamily consensuses and a host-domain assessment;
 - output file paths, external commands, and external tool versions.
 
 Rust/JSON coordinates are zero-based and half-open unless a field says otherwise. Curator-facing TSV boundary and sequence positions are one-based inclusive. Empty optional TSV fields mean unavailable, not zero.
@@ -178,7 +191,32 @@ The self-contained `report.html` includes a curator boundary editor that downloa
 
 ## Confidence and warnings
 
-Overall tiers are `high`, `moderate`, `low`, or `insufficient`. The tier combines usable-copy count, agreement at each boundary, missingness, mixed-subfamily evidence, terminal-structure coherence, and protein-domain strand/architecture coherence. It is an assessment tier, not a calibrated probability. Warning codes make uncertainty actionable, including uncertain boundaries, insufficient overlap, possible mixed subfamilies, missing coordinate evidence, partial/truncated domains, domains on both strands, and possible host sequence.
+Overall tiers are `high`, `moderate`, `low`, or `insufficient`. A documented weighted heuristic combines usable-copy count, boundary agreement, completeness, mixed-subfamily evidence, terminal-structure coherence, and protein-domain coherence. Deterministic leave-one-copy-out boundary inference (up to 20 replicates) reports left/right stability separately. Neither the tier nor stability is a statistical probability.
+
+An optional calibrated probability is emitted only with a validated external table such as:
+
+```json
+{
+  "schema_version": "reputils.confidence-calibration.v1",
+  "source": "description of the held-out, curator-labeled data set",
+  "bins": [
+    {
+      "minimum_score": 0.0,
+      "maximum_score": 0.5,
+      "estimated_probability_correct": 0.35,
+      "sample_size": 120
+    },
+    {
+      "minimum_score": 0.5,
+      "maximum_score": 1.0,
+      "estimated_probability_correct": 0.82,
+      "sample_size": 180
+    }
+  ]
+}
+```
+
+The example numbers are illustrative and must not be used as a real calibration. Bins must be ordered and non-overlapping, probabilities must lie in `[0,1]`, and sample sizes must be positive. The result records the matching bin's source and sample size. Without a table, the JSON explicitly marks confidence as heuristic/internal. Warning codes make uncertainty actionable, including uncertain boundaries, unstable jackknife boundaries, insufficient overlap, possible mixed subfamilies, missing coordinate evidence, partial/truncated domains, domains on both strands, and possible host sequence.
 
 ## Known limitations
 
@@ -189,7 +227,11 @@ Overall tiers are `high`, `moderate`, `low`, or `insufficient`. The tier combine
 - LINE 5′ truncation makes left boundaries intrinsically less certain.
 - Non-autonomous elements may have strong termini but no coding domains.
 - Coordinate-aware TSD calls assume correct zero-based, half-open unextended intervals and do not fetch/merge loci.
-- ORF prediction via `getorf`, automatic subfamily splitting, full host-gene classification, and statistically calibrated boundary confidence remain follow-up work. Selected-copy protein searches are opt-in and bounded.
+- Subfamily splitting is intentionally conservative, uses one deterministic clustering diagnostic, and does not recursively curate or classify each emitted cluster.
+- `getorf` integration does not repair frameshifts or replace specialist gene prediction.
+- Host-domain evidence is a review signal, not full host-gene classification or an automatic rejection rule.
+- Calibration-table quality is the user's responsibility; reputils does not ship a calibration data set or claim calibrated probabilities without one.
+- Selected-copy protein searches are opt-in and bounded.
 
 ## Legacy commands
 
