@@ -64,17 +64,9 @@ impl BlockRecords {
             let seq_length = seq.sequence.len();
             // calculate new starts and ends
 
-            let new_start = if start - extend == 0 {
-                0
-            } else {
-                start - extend
-            };
+            let new_start = start.saturating_sub(extend);
 
-            let new_end = if end + extend >= seq_length {
-                seq_length
-            } else {
-                end + extend
-            };
+            let new_end = end.saturating_add(extend).saturating_add(1).min(seq_length);
 
             let trimmed_seq = seq.sequence.get(new_start..new_end);
 
@@ -112,65 +104,23 @@ impl BlockRecords {
     // non-consecutive hits.
 
     fn remove_isolates(&self, next_hit: usize) -> Self {
-        let mut index = 0;
-        let len = self.0.len();
-
-        let mut out_vec = Vec::new();
-
-        loop {
-            if index == len - 1 {
-                break;
-            }
-
-            let val = *self.0.get(index).unwrap(); // should never panic.
-
-            // guard against indexing out of range
-            let left_val = if index == 0 {
-                self.0.get(index)
-            } else {
-                self.0.get(index - 1)
-            };
-
-            // no need to guard here as the break should have it covered
-            let right_val = self.0.get(index + 1);
-
-            // some logic
-            match left_val {
-                Some(lv) => {
-                    match right_val {
-                        Some(rv) => {
-                            // lv & rv exist
-                            // if the position of the current hit
-                            // minus/plus 10bp is not greater/less (i.e. it includes)
-                            // than the previous/next hit, add this hit.
-                            if !(val.position - next_hit > lv.position)
-                                && !(val.position + next_hit < rv.position)
-                            {
-                                out_vec.push(val)
-                            }
-                        }
-                        None => {
-                            // lv only exists
-                            if !(val.position - next_hit > lv.position) {
-                                out_vec.push(val)
-                            }
-                        }
-                    }
+        let retained = self
+            .0
+            .iter()
+            .enumerate()
+            .filter_map(|(i, record)| {
+                let left_close =
+                    i > 0 && record.position.saturating_sub(self.0[i - 1].position) <= next_hit;
+                let right_close = self.0.get(i + 1).is_some_and(|right| {
+                    right.position.saturating_sub(record.position) <= next_hit
+                });
+                if left_close || right_close || self.0.len() == 1 {
+                    Some(*record)
+                } else {
+                    None
                 }
-                None => {
-                    match right_val {
-                        Some(rv) => {
-                            // rv only exists
-                            if !(val.position + next_hit < rv.position) {
-                                out_vec.push(val)
-                            }
-                        }
-                        None => out_vec.push(val),
-                    }
-                }
-            }
-            index += 1;
-        }
-        BlockRecords(out_vec)
+            })
+            .collect();
+        BlockRecords(retained)
     }
 }

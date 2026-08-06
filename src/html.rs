@@ -11,6 +11,7 @@ use crate::utils::alignment::{Alignment, Sequence};
 use crate::utils::revcomp::reverse_complement;
 use crate::utils::windows::SeqWindows;
 
+#[allow(clippy::format_in_format_args)]
 pub fn render_html(matches: &clap::ArgMatches) {
     // parse command line args
     let fasta = matches.value_of("fasta").unwrap();
@@ -66,10 +67,7 @@ pub fn render_html(matches: &clap::ArgMatches) {
     let trimmed = blocks.trim(matrix, trim_extend, trim_next_hit, true);
 
     // perhaps do something more sensible with this.
-    let ok_trimmed = match trimmed {
-        Some(t) => t,
-        None => Alignment::new(),
-    };
+    let ok_trimmed = trimmed.unwrap_or_default();
     eprintln!("[+]\tTrimmed alignment.");
 
     // for the header of the html

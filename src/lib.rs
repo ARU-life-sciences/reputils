@@ -1,4 +1,5 @@
 pub mod con;
+pub mod curate;
 pub mod div;
 pub mod dot;
 pub mod html;

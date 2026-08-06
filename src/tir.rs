@@ -57,18 +57,16 @@ pub fn revcomp_alignment(matches: &clap::ArgMatches) {
     let alignment = aligner.semiglobal(&forward_consensus, &reverse_consensus);
     let alignment_pretty = alignment.pretty(&forward_consensus, &reverse_consensus);
 
-    let mut lim = 0;
     let mut start = 0;
     let mut end = 0;
 
-    for (base, count) in SequentialCount::new(alignment.operations.iter()) {
+    for (lim, (base, count)) in SequentialCount::new(alignment.operations.iter()).enumerate() {
         end += count;
         if lim < 10 {
             println!("{} - {}: {:?} occurs {} times", start, end, base, count);
         } else {
             break;
         }
-        lim += 1;
         start = end;
     }
 

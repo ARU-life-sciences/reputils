@@ -2,12 +2,14 @@ use clap::{App, Arg};
 use std::process;
 
 use reputils::con::make_consensus;
+use reputils::curate::{run as run_curate, CurateOptions};
 use reputils::div::diversity_windows;
 use reputils::dot::dot;
 use reputils::html::render_html;
 use reputils::tir::revcomp_alignment;
 use reputils::tsd::find_tsds;
 use reputils::ttc::ttc;
+use std::path::PathBuf;
 
 fn main() {
     let matches = App::new("reputils")
@@ -99,7 +101,7 @@ fn main() {
                 )
                 .arg(
                     Arg::with_name("tsd_max_window")
-                        .long("tsd_min_window")
+                        .long("tsd_max_window")
                         .takes_value(true)
                         .required(true)
                         .default_value("12")
@@ -354,10 +356,88 @@ fn main() {
                         .help("TSD's are searched for <= to this length."),
                 )
         )
+        .subcommand(
+            clap::SubCommand::with_name("curate")
+                .about("Propose evidence-based TE family boundaries, consensus, and curation report.")
+                .arg(Arg::with_name("alignment").long("alignment").takes_value(true).required(true).help("Aligned extended genomic copies in FASTA format."))
+                .arg(Arg::with_name("out").long("out").takes_value(true).required(true).help("Output directory."))
+                .arg(Arg::with_name("manifest").long("manifest").takes_value(true).help("Optional rep.copy-recovery.v1 JSON manifest."))
+                .arg(Arg::with_name("query").long("query").takes_value(true).help("Optional provisional consensus FASTA."))
+                .arg(Arg::with_name("genome").long("genome").takes_value(true).help("Optional source genome FASTA."))
+                .arg(Arg::with_name("coordinates").long("coordinates").takes_value(true).help("Optional per-copy coordinate table."))
+                .arg(Arg::with_name("hmm_db").long("hmm-db").takes_value(true).help("Profile-HMM database for hmmscan."))
+                .arg(Arg::with_name("repeatpeps").long("repeatpeps").takes_value(true).help("Alternative protein-domain HMM database."))
+                .arg(Arg::with_name("threads").long("threads").takes_value(true).default_value("1"))
+                .arg(Arg::with_name("hmmscan").long("hmmscan").takes_value(true).help("hmmscan executable path; also REPUTILS_HMMSCAN."))
+                .arg(Arg::with_name("hmmsearch").long("hmmsearch").takes_value(true).help("hmmsearch executable path; also REPUTILS_HMMSEARCH."))
+                .arg(Arg::with_name("getorf").long("getorf").takes_value(true).help("getorf executable path; also REPUTILS_GETORF."))
+                .arg(Arg::with_name("domain_rules").long("domain-rules").takes_value(true).help("Optional JSON domain interpretation rule file."))
+                .arg(Arg::with_name("boundary_override").long("boundary-override").takes_value(true).help("Apply a reputils.curation-override.v1 JSON boundary override."))
+                .arg(Arg::with_name("scan_selected_copies").long("scan-selected-copies").help("Also scan selected genomic copies for protein domains."))
+                .arg(Arg::with_name("max_copy_domain_targets").long("max-copy-domain-targets").takes_value(true).default_value("10").help("Maximum selected copies searched for domains."))
+                .arg(Arg::with_name("min_copies").long("min-copies").takes_value(true).default_value("3"))
+                .arg(Arg::with_name("force").long("force").help("Replace known curation output files in an existing directory."))
+        )
         .get_matches();
 
     let subcommand = matches.subcommand();
     match subcommand.0 {
+        "curate" => {
+            let matches = subcommand.1.unwrap();
+            let path = |name: &str| matches.value_of(name).map(PathBuf::from);
+            let options = CurateOptions {
+                alignment: PathBuf::from(matches.value_of("alignment").unwrap()),
+                out: PathBuf::from(matches.value_of("out").unwrap()),
+                manifest: path("manifest"),
+                query: path("query"),
+                genome: path("genome"),
+                coordinates: path("coordinates"),
+                hmm_db: path("hmm_db"),
+                repeatpeps: path("repeatpeps"),
+                threads: matches
+                    .value_of("threads")
+                    .unwrap()
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: --threads must be a positive integer");
+                        process::exit(2)
+                    }),
+                hmmscan: path("hmmscan"),
+                hmmsearch: path("hmmsearch"),
+                getorf: path("getorf"),
+                domain_rules: path("domain_rules"),
+                boundary_override: path("boundary_override"),
+                scan_selected_copies: matches.is_present("scan_selected_copies"),
+                max_copy_domain_targets: matches
+                    .value_of("max_copy_domain_targets")
+                    .unwrap()
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: --max-copy-domain-targets must be a positive integer");
+                        process::exit(2)
+                    }),
+                min_copies: matches
+                    .value_of("min_copies")
+                    .unwrap()
+                    .parse()
+                    .unwrap_or_else(|_| {
+                        eprintln!("error: --min-copies must be a positive integer");
+                        process::exit(2)
+                    }),
+                force: matches.is_present("force"),
+            };
+            match run_curate(&options) {
+                Ok(result) => eprintln!(
+                    "[+] Curation complete: {} ({:?} confidence)",
+                    options.out.display(),
+                    result.confidence_tier
+                ),
+                Err(error) => {
+                    eprintln!("error: {}", error);
+                    process::exit(1);
+                }
+            }
+        }
         "con" => {
             let matches = subcommand.1.unwrap();
             make_consensus(matches);

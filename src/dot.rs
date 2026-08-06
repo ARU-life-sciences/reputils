@@ -28,7 +28,7 @@ pub fn dot(matches: &clap::ArgMatches) -> Result<(), Box<dyn std::error::Error +
 
         let seq_windows = SeqWindows::new(record.seq(), wsize, wstep);
 
-        let seq_windows_vec: Vec<&[u8]> = seq_windows.map(|s| s).collect();
+        let seq_windows_vec: Vec<&[u8]> = seq_windows.collect();
 
         // Base 1d array
         let mut matrix_raw = vec![false; no_its * no_its];

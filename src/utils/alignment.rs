@@ -30,6 +30,12 @@ pub struct Alignment {
     pub matrix: Vec<Sequence>,
 }
 
+impl Default for Alignment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Alignment {
     pub fn new() -> Self {
         Alignment { matrix: Vec::new() }
@@ -247,6 +253,12 @@ pub struct AlignHash {
 }
 
 pub struct TSDHash(Vec<AlignHash>);
+
+impl Default for TSDHash {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl TSDHash {
     pub fn new() -> Self {

@@ -62,7 +62,7 @@ fn plot_pi_windows(
         .set_label_area_size(LabelAreaPosition::Left, (8).percent())
         .set_label_area_size(LabelAreaPosition::Bottom, (8).percent())
         // zero first value needs to be replaced by a minimum I think... for the Y
-        .build_cartesian_2d(0f32..xmax as f32, 0f32..ymax as f32)?;
+        .build_cartesian_2d(0f32..xmax as f32, 0f32..ymax)?;
 
     chart
         .configure_mesh()
