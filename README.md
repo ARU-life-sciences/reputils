@@ -1,224 +1,218 @@
-# Repeat sequence utilities (reputils)
+# reputils
 
-Help identify transposable elements (TE's) in manual curation by bringing together several lines of evidence. The input is mainly an alignment of a consensus TE sequence which has been blasted against the original genome, and aligned. These alignments are often fragmented and gappy.
+`reputils` is a semi-automatic curation tool for unknown transposable-element (TE) families. It combines evidence from an alignment of extended genomic copies to propose—not assert—family boundaries, select representative copies, build an uncertainty-aware consensus, and produce a reviewable HTML report plus versioned machine-readable results.
 
-The program of greatest use is probably `reputils html`. It brings together all of the functionality so far implemented into a single html document.
+The original lightweight `con`, `div`, `dot`, `html`, `tir`, `tsd`, and `ttc` commands remain available. `ttc` is the legacy fixed-threshold trimmer; use `curate` when you need combined evidence, alternatives, warnings, and explicit confidence.
 
-## Usage
+## Where reputils fits
 
-Building <a href="https://www.rust-lang.org/tools/install">requires Rust</a>. 
+Three related tasks should not be conflated:
+
+1. **Copy recovery and alignment generation** finds genomic instances and creates an alignment. The companion `rep` program can provide extended copies, coordinates, and a `rep.copy-recovery.v1` manifest. `reputils` does not run BLAST, merge loci, or make MAFFT its primary pipeline.
+2. **Curation** decides which aligned region is supported as the repeat, assesses copies, and refines the consensus. This is the role of `reputils curate`.
+3. **Classification** interprets terminal structures and protein domains. `reputils` reports conservative architecture hints; it is not a fully automatic TE classifier or a replacement for RepeatMasker/RepeatModeler.
+
+The minimum standalone input is an equal-length FASTA alignment containing at least three copies by default. A provisional consensus, manifest, coordinates, genome, and protein-domain HMMs are optional.
+
+## Installation
+
+A Rust toolchain is required.
 
 ```bash
-git clone https://github.com/tolkit/reputils
+git clone https://github.com/ARU-life-sciences/reputils
 cd reputils
 cargo build --release
-# ./target/release/reputils is the executable
-# show help
 ./target/release/reputils --help
 ```
 
-Everything is pretty much printed to stdout or to a PNG.
+## Complete curation example
 
-```
-reputils 0.2.0
-Max Brown <mb39@sanger.ac.uk>
-reputils - some functions to aid TE identification.
-
-USAGE:
-    reputils [SUBCOMMAND]
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-SUBCOMMANDS:
-    con     Make a consensus out of a multiple alignment fasta. Optimised for TE's.
-    div     Calculate diversity along sliding windows of an alignment.
-    dot     Make (self) dotplots from a fasta file. Suitable really only for short(ish) sequences.
-    help    Prints this message or the help of the given subcommand(s)
-    html    Render an HTML to gather several lines of identification evidence for a TE.
-    tir     Take a consensus and quickly check for terminal inverted repeats (TIR)
-    tsd     Try to find the Target Site Duplication of a TE. Prints a table.
-    ttc     Trim an alignment to the core TE sequence.
+```bash
+reputils curate \
+  --alignment copies.aligned.fa \
+  --manifest family.manifest.json \
+  --query provisional-consensus.fa \
+  --genome genome.fa \
+  --hmm-db te-domains.hmm \
+  --threads 8 \
+  --out curated-family/
 ```
 
-### HTML overview
+Only `--alignment` and `--out` are mandatory:
 
-Combines all of the other functions so far into a single HTML document. See the `/examples` folder for an example. To see it in action, go <a href="https://htmlpreview.github.io/?https://github.com/tolkit/reputils/blob/main/examples/example.html"><b>here</b></a>.
-
-```
-reputils-html 
-Render an HTML to gather several lines of identification evidence for a TE.
-
-USAGE:
-    reputils html --div_window_size <div_window_size> --div_window_step <div_window_step> --dot_nmatch <dot_nmatch> --dot_wsize <dot_wsize> --dot_wstep <dot_wstep> --fasta <fasta> --trim_extend <trim_extend> --trim_iden <trim_iden> --trim_miss <trim_miss> --trim_next_hit <trim_next_hit> --tsd_len <tsd_len> --tsd_min_window <tsd_max_window> --tsd_min_window <tsd_min_window>
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-OPTIONS:
-        --div_window_size <div_window_size>    The size of the window to iterate over. [default: 10]
-        --div_window_step <div_window_step>    The step size of the window to iterate over. If equal to window, then
-                                               windows are non-overlapping. [default: 3]
-        --dot_nmatch <dot_nmatch>              Number of matches to tolerate a positive match. [default: 1]
-        --dot_wsize <dot_wsize>                Window size to iterate over sequence. [default: 10]
-        --dot_wstep <dot_wstep>                Window step size for window iterator. [default: 3]
-    -f, --fasta <fasta>                        The multiple alignment file in fasta format.
-        --trim_extend <trim_extend>            Extend alingment either end by number of bases specified. [default: 30]
-        --trim_iden <trim_iden>                % identity in a column for the column to be considered a hit. [default:
-                                               0.85]
-        --trim_miss <trim_miss>                % missing data tolerated in a column. [default: 0.1]
-        --trim_next_hit <trim_next_hit>        Isolated hits of well conserved columns leads to bad trimming. Play with
-                                               this number? [default: 1]
-        --tsd_len <tsd_len>                    Number of bases from beginning or end of alignment to query. [default:
-                                               30]
-        --tsd_min_window <tsd_max_window>      TSD's are searched for <= to this length. [default: 12]
-        --tsd_min_window <tsd_min_window>      TSD's are searched for >= to this length. [default: 2]
+```bash
+reputils curate --alignment copies.aligned.fa --out curated-family/
 ```
 
-### Make a consensus
+Options:
 
-```
-reputils-con 
-Make a consensus out of a multiple alignment fasta. Optimised for TE's.
+- `--manifest`: a `rep.copy-recovery.v1` JSON manifest. For a real `rep` family manifest, the sibling `copies.tsv` is discovered automatically and `locus_id=…` FASTA IDs are resolved; standalone manifests may instead contain an inline `copies` array.
+- `--coordinates`: a tab-separated table whose header includes `copy_id`; recognised metadata columns are listed below. Values override matching manifest rows.
+- `--query`: provisional consensus FASTA used for per-copy identity.
+- `--genome`: source genome FASTA. With `subject_id`, `unextended_start`, and `unextended_end`, immediately adjacent flanks are tested for TSDs. Coordinates are interpreted as zero-based, half-open.
+- `--hmm-db` or `--repeatpeps`: a local HMM database searched against built-in six-frame translations of the refined consensus.
+- `--hmmscan`, `--hmmsearch`: executable paths. `REPUTILS_HMMSCAN` and `REPUTILS_HMMSEARCH` are also recognised. `hmmscan` is preferred; `hmmsearch` is used when no hmmscan path/environment override is supplied.
+- `--domain-rules`: optional JSON rule table; see `examples/domain-rules.json`. Each rule has an ID, case-insensitive patterns, TE association, optional architecture hint, and optional warning.
+- `--scan-selected-copies` and `--max-copy-domain-targets`: opt in to HMM searches of a deterministic, bounded selected-copy subset in addition to the refined consensus.
+- `--boundary-override`: apply a validated `reputils.curation-override.v1` file exported by the HTML report. Explicit curator boundaries are preserved and not automatically reranked.
+- `--getorf`: reserved for a later ORF-target mode. Supplying it currently returns an explicit error; omit it to use built-in six-frame translation.
+- `--threads`, `--min-copies`, `--force`: external-tool threads, validation minimum, and permission to overwrite known output files in an existing directory.
 
-USAGE:
-    reputils con [FLAGS] [OPTIONS] --fasta <fasta>
+The command never silently discards a copy. Every copy appears in `copies.tsv` and `result.json` with selection state and exclusion reason.
 
-FLAGS:
-    -a, --append     Append the consensus to the input fasta.
-    -h, --help       Prints help information
-    -V, --version    Prints version information
+## Input validation
 
-OPTIONS:
-    -f, --fasta <fasta>    The multiple alignment file in fasta format.
-    -n, --name <name>      Name of the consensus sequence header. [default: CONS]
-```
+The curation core returns structured errors for:
 
-### Diversity in windows over a TE alignment
+- an empty alignment;
+- unequal aligned lengths;
+- duplicate record IDs;
+- unsupported nucleotide characters;
+- fewer records than `--min-copies`;
+- malformed manifests or coordinate tables;
+- invalid parameters;
+- requested domain analysis when an external executable fails or is unavailable.
 
-It's more clear when the alignment is trimmed to include only the putative TE.
+Accepted symbols are A/C/G/T/U, IUPAC ambiguity symbols, N, `?`, `-`, and `.` (case-insensitive). U is treated as T for nucleotide calls; `-` and `.` are gaps. Gaps, unknowns, ambiguous bases, and called A/C/G/T bases remain distinct evidence categories.
 
-```
-reputils-div 
-Calculate diversity along sliding windows of an alignment.
+## Evidence and algorithms
 
-USAGE:
-    reputils div [FLAGS] [OPTIONS] --fasta <fasta> --step <step> --window <window>
+### Alignment columns
 
-FLAGS:
-    -h, --help       Prints help information
-    -p, --plot       Plot the diversity across windows of the alignment. Output is a PNG.
-    -V, --version    Prints version information
+`columns.tsv` contains one row per input alignment column. Denominators are explicit:
 
-OPTIONS:
-    -d, --dir <dir>          Directory to put plot in. [default: .]
-    -f, --fasta <fasta>      The consensus sequence file in fasta format.
-    -n, --name <name>        Name of the plot/PNG. [default: div_plot]
-    -s, --step <step>        The step size of the window to iterate over. If equal to window, then windows are non-
-                             overlapping. [default: 25]
-    -w, --window <window>    The size of the window to iterate over. [default: 25]
-```
+- `occupancy = non_gap_count / all_sequences`; ambiguous and unknown symbols are occupied.
+- `gap_fraction = gap_count / all_sequences`.
+- `n_fraction = unknown_count / all_sequences`; this counts N and `?`, not other IUPAC ambiguity.
+- `major_base_frequency_among_called_bases = major A/C/G/T count / called A/C/G/T count`.
+- `major_base_frequency_among_all_sequences = major A/C/G/T count / all_sequences`.
+- entropy is Shannon entropy in bits over called A/C/G/T only; gaps, N, and ambiguity do not become nucleotides.
+- copy starts/ends are the first/last non-gap aligned columns. Gap opens/closes count transitions between adjacent columns within each row.
 
-### Presence of TIR's
+Consensus call and confidence fields are populated only for retained columns. Confidence reflects weighted support and copy count; it is not a calibrated probability.
 
-Quickly check whether your consensus sequence has TIR's.
+### Copy metrics and representative selection
 
-```
-reputils-tir 
-Take a consensus and quickly check for terminal inverted repeats (TIR)
+Completeness, called/gap/unknown counts, terminal gaps, internal gap runs, coverage, provisional/refined identity, and a transparent quality score are calculated for every row. Terminal missingness is not treated as an internal deletion. Pairwise identity uses mutually called A/C/G/T sites only.
 
-USAGE:
-    reputils tir [FLAGS] --fasta <fasta>
+Copies are sorted deterministically by quality. Clearly unusable fragments are marked excluded. With redundancy control, a copy at or above 98% identity to a selected copy across the minimum mutual overlap is retained in metadata but does not add another full vote to consensus calling.
 
-FLAGS:
-    -h, --help       Prints help information
-    -s, --show       Pretty print the alignment.
-    -V, --version    Prints version information
+### Boundary inference
 
-OPTIONS:
-    -f, --fasta <fasta>    The consensus sequence file in fasta format.
-```
+The initial, deliberately understandable model smooths a per-column body track:
 
-### Trim alignment to core TE sequence
-
-This script will take an alignment and trim it to the TE, plus any TSD's (hopefully). It needs a bit of testing, but worked on the Mariners I was looking at. TE's with 5' truncation may not work with this.
-
-```
-reputils-ttc 
-Trim an alignment to the core TE sequence.
-
-USAGE:
-    reputils ttc --extend <extend> --fasta <fasta> --identity <identity> --missing <missing> --next_hit <next_hit>
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-OPTIONS:
-    -e, --extend <extend>        Extend the extracted alignment by `e` many bases either side of the alignment.
-                                 [default: 15]
-    -f, --fasta <fasta>          The multiple alignment sequence file in fasta format.
-    -i, --identity <identity>    % identity in a column for the column to be considered a hit. [default: 0.8]
-    -m, --missing <missing>      % missing data tolerated in a column. [default: 0.1]
-    -n, --next_hit <next_hit>    Isolated hits of well conserved columns leads to bad trimming. Play with this number?
-                                 [default: 1]
+```text
+body support = 0.50 × occupancy
+             + 0.35 × called-base identity
+             + 0.15 × (1 − entropy / 2)
 ```
 
-### Help to identify TSD's
+It locates sustained supported intervals, searches neighbouring recurrent copy starts/ends, and ranks boundary pairs using:
 
-Looks at the either end of a *trimmed* alignment (must be trimmed). I don't know how useful this actually is (it might confuse things more). But here it is:
-
-```
-reputils-tsd 
-Try to find the Target Site Duplication of a TE. Prints a table.
-
-USAGE:
-    reputils tsd --fasta <fasta> --length <length> --maximum <maximum> --minimum <minimum>
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-OPTIONS:
-    -f, --fasta <fasta>        The multiple alignment sequence file in fasta format.
-    -l, --length <length>      Number of bases from beginning and end of alignment to query. [default: 20]
-    -x, --maximum <maximum>    TSD's are searched for <= to this length. [default: 12]
-    -m, --minimum <minimum>    TSD's are searched for >= to this length. [default: 2]
-
+```text
+pair score = 0.65 × mean internal body support
+           + 0.20 × boundary start/end concentration
+           + 0.15 × occupancy-transition support
+           − 0.20 × insufficient-copy penalty
 ```
 
-### Dotplot of sequences
+All retained alternatives are then jointly rescored with `+0.12 × terminal support + 0.08 × coordinate-TSD support + 0.10 × domain containment − 0.20 × domain-cut penalty − 0.10 × conserved-edge penalty`. If the winner changes, the final consensus, copy identities, terminal evidence, and optional domain search are regenerated. Every winning and alternative component is written to `boundaries.tsv` and JSON. Left and right confidence describe agreement among signals, not a statistical posterior. Diffuse 5′ starts may produce a LINE-like/asymmetric hint without forcing both ends to behave symmetrically.
 
-Takes a fasta file and self compares each sequence.
+### Refined consensus
 
+Only selected representatives vote, weighted by copy quality. Terminal missing sequence does not vote as a deletion. Internal gaps are tracked separately and columns with substantial gap/called support are marked as deletion polymorphisms. Strong single-base support produces A/C/G/T; genuine mixed support produces an IUPAC code; sparse or weak support produces N. The FASTA remains standard nucleotide sequence.
+
+### Structural evidence
+
+Terminal windows across several lengths are compared directly for LTR-like evidence and against the reverse complement for TIR-like evidence. Short weak matches cannot dominate boundary inference. `structural-evidence.tsv` contains terminal-repeat rows and, when coordinates and a genome are available, per-copy TSD rows.
+
+Coordinate-aware TSD analysis compares only the immediately adjacent left and right flank for lengths 2–20 bp. Exact matches and near-exact matches (one mismatch for lengths of at least 8 bp) are distinguished from unsupported candidates. Family support is aggregated by length in `result.json`. Arbitrary internal matching substrings are not accepted as coordinate TSDs.
+
+### Subfamilies
+
+Distances use mutually called overlapping sites and a minimum overlap. A deterministic single-link clustering diagnostic reports candidate clusters, membership, within/between distances, insufficient comparisons, and split support. It warns about possible mixed subfamilies but does not automatically emit multiple consensuses.
+
+### Locus and host-flank diagnostics
+
+When coordinates are available, substantially overlapping source intervals and duplicate locus IDs are reported because they reduce independence. Conserved sequence outside the proposal and long weakly supported retained edges are emitted as structured `locus_diagnostics` plus warnings. These signals do not automatically delete sequence.
+
+### Protein domains
+
+`reputils` does not implement profile-HMM search. It produces six-frame translations and executes HMMER, parses domain-table output, maps amino-acid hits back to zero-based half-open nucleotide coordinates on both strands, and retains partial hits. Executed commands and tool versions are recorded.
+
+Domain names, accessions, and descriptions are interpreted with a validated JSON-configurable rule table (or the extensible internal defaults) covering reverse transcriptase, RNase H, integrase, retroviral protease/gag, endonuclease, DDE/transposase, rolling-circle Rep, helicase, tyrosine recombinase, and protein-primed polymerase concepts. These yield hints and warnings, not automatic rejection. Domains on both strands, partial domains, and ordinary host-like domains are flagged conservatively.
+
+Supply databases yourself. Compatible sources may include Dfam profile HMMs, RepeatPeps-related local resources, and curated Pfam-derived TE models. Check each source's licence and conversion/indexing requirements; the repository does not redistribute or download third-party databases and does not claim that every source is freely redistributable.
+
+## Outputs and schema
+
+```text
+curated-family/
+├── curated.consensus.fa
+├── curated.alignment.fa
+├── boundaries.tsv
+├── copies.tsv
+├── columns.tsv
+├── structural-evidence.tsv
+├── domains.tsv
+├── warnings.tsv
+├── result.json
+└── report.html
 ```
-reputils-dot 
-Make (self) dotplots from a fasta file. Suitable really only for short(ish) sequences.
 
-USAGE:
-    reputils dot --dir <dir> --fasta <fasta> --nmatches <nmatches> --wsize <wsize> --wstep <wstep>
+`result.json` uses `schema_version: "reputils.curation.v1"`. Its top-level fields are:
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
+- `schema_version`, `reputils_version`;
+- `inputs` with paths and SHA-256 checksums where readable;
+- `parameters` and alignment summary;
+- all copy metrics and selected copy IDs;
+- winning and alternative boundaries with component scores;
+- refined consensus and per-position confidence/profile;
+- terminal-repeat, TSD, TSD-by-length, domain, and subfamily evidence;
+- architecture hints, warnings, and overall confidence tier;
+- output file paths, external commands, and external tool versions.
 
-OPTIONS:
-    -d, --dir <dir>              Dirname where output plots should go. [default: dot]
-    -f, --fasta <fasta>          The multiple alignment sequence file in fasta format.
-    -n, --nmatches <nmatches>    Number of matches to tolerate a positive match. [default: 1]
-    -i, --wsize <wsize>          Window size to iterate over sequence. [default: 10]
-    -t, --wstep <wstep>          Window step size for window iterator. [default: 4]
+Rust/JSON coordinates are zero-based and half-open unless a field says otherwise. Curator-facing TSV boundary and sequence positions are one-based inclusive. Empty optional TSV fields mean unavailable, not zero.
+
+The self-contained `report.html` includes a curator boundary editor that downloads a versioned override JSON, and the proposal, alternatives via the embedded result evidence, occupancy/identity/entropy tracks, raw start/end and gap-transition data, copy completeness and selection, the alignment, structural evidence, domains, subfamily analysis, warnings, parameters, and provenance. It uses no browser-side network resources. A curator should review and may override the proposed interval before downstream use. The downloaded `boundary-override.json` can be applied with `--boundary-override`; its one-based inclusive interval is range checked and recorded in `result.json`.
+
+## Confidence and warnings
+
+Overall tiers are `high`, `moderate`, `low`, or `insufficient`. The tier combines usable-copy count, agreement at each boundary, missingness, mixed-subfamily evidence, terminal-structure coherence, and protein-domain strand/architecture coherence. It is an assessment tier, not a calibrated probability. Warning codes make uncertainty actionable, including uncertain boundaries, insufficient overlap, possible mixed subfamilies, missing coordinate evidence, partial/truncated domains, domains on both strands, and possible host sequence.
+
+## Known limitations
+
+- Old, highly diverged elements may have too little homology for stable boundaries.
+- Very few independent copies produce low or insufficient confidence.
+- Mixed families and nested repeats can distort one-consensus analysis.
+- Assembly errors and frameshifts can fragment structural/domain evidence.
+- LINE 5′ truncation makes left boundaries intrinsically less certain.
+- Non-autonomous elements may have strong termini but no coding domains.
+- Coordinate-aware TSD calls assume correct zero-based, half-open unextended intervals and do not fetch/merge loci.
+- ORF prediction via `getorf`, automatic subfamily splitting, full host-gene classification, and statistically calibrated boundary confidence remain follow-up work. Selected-copy protein searches are opt-in and bounded.
+
+## Legacy commands
+
+```text
+con   consensus from an aligned FASTA
+ div  sliding-window diversity
+ dot  short-sequence self dotplots
+html  legacy combined stdout HTML
+ tir  quick consensus/reverse-complement alignment
+ tsd  legacy matching substrings near alignment ends
+ ttc  legacy fixed missingness/identity threshold trimmer
 ```
 
-<img src="examples/BDGG01000017.1_186586-190792.png">
+Run `reputils <command> --help` for its established options. The legacy `html` spelling bug for `--tsd_max_window` and unsafe `ttc` extension arithmetic were corrected; output formats otherwise remain unchanged.
 
-### Performance
+## Development
 
-Performance will take a dip with large sequences (>10/100kb), especially `reputils dot`. If you want massive dotplots, there are many other more efficient programs out there!
+Standard checks require no HMMER, MAFFT, or genome database:
 
-### TODO's
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all
+```
 
-- simple fasta stats of consensus sequences, sequence length, and length distribution (if multiple fastas)?
-- Detect 5' truncation?
+External command tests should use mock executables and tiny fixture databases.
